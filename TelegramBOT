@@ -1,0 +1,303 @@
+import asyncio
+import sqlite3
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# ========== КОНФИГ ==========
+BOT_TOKEN = "8696040149:AAEAFIssSxG7b6FLCNo0_0Tqs7C2US2QfYg"
+
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# ========== БАЗА ДАННЫХ ==========
+conn = sqlite3.connect('divine_bot.db', check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0,
+    last_bonus TEXT
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT,
+    amount INTEGER,
+    detail TEXT,
+    date TEXT
+)
+''')
+conn.commit()
+
+# ========== ФУНКЦИИ БАЗЫ ==========
+def get_user(user_id):
+    cursor.execute("SELECT balance, last_bonus FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    if not result:
+        cursor.execute("INSERT INTO users (user_id, balance, last_bonus) VALUES (?, 0, NULL)", (user_id,))
+        conn.commit()
+        return 0, None
+    return result
+
+def get_balance(user_id):
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    result = cursor.fetchone()
+    return result[0] if result else 0
+
+def update_balance(user_id, amount):
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+
+def set_bonus_date(user_id, date_str):
+    cursor.execute("UPDATE users SET last_bonus = ? WHERE user_id = ?", (date_str, user_id))
+    conn.commit()
+
+def add_history(user_id, type_, amount, detail):
+    date_now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    cursor.execute("INSERT INTO history (user_id, type, amount, detail, date) VALUES (?, ?, ?, ?, ?)",
+                   (user_id, type_, amount, detail, date_now))
+    conn.commit()
+
+def get_history(user_id):
+    cursor.execute("SELECT type, amount, detail, date FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,))
+    return cursor.fetchall()
+
+# ========== КЛАВИАТУРЫ ==========
+def main_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Перевести", callback_data="transfer")],
+        [InlineKeyboardButton(text="📜 История", callback_data="history"), 
+         InlineKeyboardButton(text="👤 Профиль", callback_data="profile")]
+    ])
+
+def profile_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Забрать Бонус", callback_data="bonus")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
+
+def confirm_menu(recipient_id, amount):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить перевод", callback_data=f"confirm_transfer_{recipient_id}_{amount}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_transfer")]
+    ])
+
+# ========== СОСТОЯНИЯ FSM ==========
+class TransferStates(StatesGroup):
+    waiting_for_amount = State()
+    waiting_for_recipient = State()
+
+# ========== ОБРАБОТЧИКИ ==========
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    user_id = message.from_user.id
+    get_user(user_id)
+    await message.answer(
+        "✨ *Добро пожаловать в экосистему DIVINE!* ✨\n\n"
+        "💰 Здесь твоя цифровая валюта, которая всегда с тобой.\n"
+        "Используй кнопки ниже, чтобы управлять своими средствами.",
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(lambda c: c.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🏠 *Главное меню*\n\nВыбери действие:",
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "profile")
+async def show_profile(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    balance = get_balance(user_id)
+    await callback.message.edit_text(
+        f"👤 *Твой профиль*\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"💰 Баланс: *{balance} DIVINE*\n\n"
+        f"⬇️ Нажми «Забрать Бонус», чтобы получить 2000 DIVINE ежедневно.",
+        reply_markup=profile_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "bonus")
+async def get_bonus(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    _, last_bonus = get_user(user_id)
+    today = datetime.now().date().isoformat()
+
+    if last_bonus == today:
+        await callback.answer("⏳ Ты уже забирал бонус сегодня! Возвращайся завтра.", show_alert=True)
+        return
+
+    update_balance(user_id, 2000)
+    set_bonus_date(user_id, today)
+    add_history(user_id, "🎁 Бонус", 2000, "Ежедневный бонус")
+
+    await callback.message.edit_text(
+        f"✅ *Бонус получен!*\n\n"
+        f"🎉 +2000 DIVINE зачислено на твой счёт.\n"
+        f"💎 Продолжай пользоваться экосистемой!",
+        reply_markup=profile_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer("🎁 Бонус зачислен!", show_alert=True)
+
+@dp.callback_query(lambda c: c.data == "transfer")
+async def start_transfer(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "💸 *Перевод средств*\n\n"
+        "Введи *сумму* в DIVINE, которую хочешь отправить.\n"
+        "(Минимальная сумма: 1 DIVINE)",
+        parse_mode="Markdown"
+    )
+    await state.set_state(TransferStates.waiting_for_amount)
+    await callback.answer()
+
+@dp.message(TransferStates.waiting_for_amount)
+async def process_amount(message: types.Message, state: FSMContext):
+    if not message.text.isdigit() or int(message.text) <= 0:
+        await message.answer("❌ Введи корректное число (больше 0). Попробуй снова:")
+        return
+    
+    amount = int(message.text)
+    user_id = message.from_user.id
+    balance = get_balance(user_id)
+    
+    if amount > balance:
+        await message.answer("❌ Недостаточно средств! Попробуй другую сумму:")
+        return
+    
+    await state.update_data(amount=amount)
+    await state.set_state(TransferStates.waiting_for_recipient)
+    
+    await message.answer(
+        f"💸 Сумма: *{amount} DIVINE*\n\n"
+        f"Теперь введи *ID пользователя* (число), которому хочешь перевести.\n"
+        f"Узнать ID можно в его профиле или через бота @userinfobot.",
+        parse_mode="Markdown"
+    )
+
+@dp.message(TransferStates.waiting_for_recipient)
+async def process_recipient(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ ID состоит только из цифр. Введи корректный ID:")
+        return
+    
+    recipient_id = int(message.text)
+    sender_id = message.from_user.id
+    
+    if recipient_id == sender_id:
+        await message.answer("❌ Нельзя перевести самому себе! Введи другой ID:")
+        return
+    
+    recipient_data = get_user(recipient_id)
+    if not recipient_data:
+        await message.answer("❌ Пользователь с таким ID не найден в системе. Проверь ID:")
+        return
+    
+    data = await state.get_data()
+    amount = data.get("amount")
+    
+    await message.answer(
+        f"📤 *Проверь перевод*\n\n"
+        f"💸 Сумма: *{amount} DIVINE*\n"
+        f"👤 Получатель: `{recipient_id}`\n\n"
+        f"Нажми кнопку ниже, чтобы подтвердить.",
+        reply_markup=confirm_menu(recipient_id, amount),
+        parse_mode="Markdown"
+    )
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data.startswith("confirm_transfer_"))
+async def confirm_transfer(callback: CallbackQuery):
+    _, _, recipient_id, amount = callback.data.split("_")
+    recipient_id = int(recipient_id)
+    amount = int(amount)
+    sender_id = callback.from_user.id
+    
+    balance = get_balance(sender_id)
+    if amount > balance:
+        await callback.message.edit_text(
+            "❌ Ошибка! Недостаточно средств.",
+            reply_markup=main_menu()
+        )
+        await callback.answer()
+        return
+    
+    update_balance(sender_id, -amount)
+    update_balance(recipient_id, amount)
+    
+    add_history(sender_id, "💸 Исходящий", -amount, f"Перевод пользователю {recipient_id}")
+    add_history(recipient_id, "💳 Входящий", amount, f"Перевод от пользователя {sender_id}")
+    
+    await callback.message.edit_text(
+        f"✅ *Перевод выполнен!*\n\n"
+        f"💸 Отправлено: *{amount} DIVINE*\n"
+        f"👤 Получатель: `{recipient_id}`\n\n"
+        f"✨ Операция успешно завершена.",
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer("✅ Перевод успешен!", show_alert=True)
+
+@dp.callback_query(lambda c: c.data == "cancel_transfer")
+async def cancel_transfer(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "❌ Перевод отменён.",
+        reply_markup=main_menu()
+    )
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "history")
+async def show_history(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    history_data = get_history(user_id)
+    
+    if not history_data:
+        await callback.message.edit_text(
+            "📭 *История пуста*\n\nТы ещё не совершал операций.",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+        return
+    
+    text = "📜 *История транзакций (последние 20)*\n\n"
+    for type_, amount, detail, date in history_data:
+        if amount > 0:
+            sign = "+"
+        else:
+            sign = ""
+        text += f"{type_} {sign}{amount} DIVINE | {detail}\n🕐 {date}\n\n"
+    
+    if len(text) > 3500:
+        text = text[:3500] + "\n...\n📌 Показаны последние операции."
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# ========== ЗАПУСК ==========
+async def main():
+    print("🚀 Бот DIVINE запущен!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
