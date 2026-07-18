@@ -1,0 +1,1008 @@
+import asyncio
+import sqlite3
+import random
+from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand, BotCommandScopeDefault
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
+# ====================== КОНФИГ ======================
+BOT_TOKEN = "8555719912:AAGwh1P3UIdFGStRaXtJxMQQoFAYWxfW-1M"
+ADMIN_PASSWORD = "228088"
+
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# ====================== БАЗА ======================
+conn = sqlite3.connect('bolt_bot.db', check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    balance INTEGER DEFAULT 0,
+    last_bonus TEXT
+)
+''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT,
+    amount INTEGER,
+    detail TEXT,
+    date TEXT
+)
+''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS news (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    content TEXT,
+    date TEXT
+)
+''')
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS game_bets (
+    user_id INTEGER PRIMARY KEY,
+    game TEXT,
+    bet INTEGER,
+    date TEXT
+)
+''')
+conn.commit()
+
+# ====================== ФУНКЦИИ ======================
+def get_user(user_id):
+    cursor.execute("SELECT balance, last_bonus FROM users WHERE user_id = ?", (user_id,))
+    r = cursor.fetchone()
+    if not r:
+        cursor.execute("INSERT INTO users (user_id, balance, last_bonus) VALUES (?, 0, NULL)", (user_id,))
+        conn.commit()
+        return 0, None
+    return r
+
+def get_balance(user_id):
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    r = cursor.fetchone()
+    return r[0] if r else 0
+
+def upd_balance(user_id, amount):
+    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+
+def set_balance(user_id, amount):
+    cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+
+def set_bonus_date(user_id, date_str):
+    cursor.execute("UPDATE users SET last_bonus = ? WHERE user_id = ?", (date_str, user_id))
+    conn.commit()
+
+def add_history(user_id, type_, amount, detail):
+    d = datetime.now().strftime("%d.%m.%Y %H:%M")
+    cursor.execute("INSERT INTO history (user_id, type, amount, detail, date) VALUES (?, ?, ?, ?, ?)",
+                   (user_id, type_, amount, detail, d))
+    conn.commit()
+
+def get_history(user_id):
+    cursor.execute("SELECT type, amount, detail, date FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,))
+    return cursor.fetchall()
+
+def add_news(title, content):
+    d = datetime.now().strftime("%d.%m.%Y %H:%M")
+    cursor.execute("INSERT INTO news (title, content, date) VALUES (?, ?, ?)", (title, content, d))
+    conn.commit()
+
+def get_news():
+    cursor.execute("SELECT title, content, date FROM news ORDER BY id DESC")
+    return cursor.fetchall()
+
+def add_default_news():
+    cursor.execute("SELECT COUNT(*) FROM news")
+    if cursor.fetchone()[0] == 0:
+        add_news("🚀 Запуск BOLT", "Переводы, бонус 2000 BOLT, комиссия 2% от 5000, Мини-игры: Мины, Рулетка, Башня")
+
+def save_bet(user_id, game, bet):
+    d = datetime.now().strftime("%d.%m.%Y %H:%M")
+    cursor.execute("INSERT OR REPLACE INTO game_bets (user_id, game, bet, date) VALUES (?, ?, ?, ?)",
+                   (user_id, game, bet, d))
+    conn.commit()
+
+def get_bet(user_id):
+    cursor.execute("SELECT game, bet FROM game_bets WHERE user_id = ?", (user_id,))
+    r = cursor.fetchone()
+    return {"game": r[0], "bet": r[1]} if r else None
+
+def del_bet(user_id):
+    cursor.execute("DELETE FROM game_bets WHERE user_id = ?", (user_id,))
+    conn.commit()
+
+def calc_comission(amount):
+    if amount >= 5000:
+        c = int(amount * 0.02)
+        return amount - c, c
+    return amount, 0
+
+def get_all_users():
+    cursor.execute("SELECT user_id, balance, last_bonus FROM users ORDER BY user_id")
+    return cursor.fetchall()
+
+def get_users_count():
+    cursor.execute("SELECT COUNT(*) FROM users")
+    return cursor.fetchone()[0]
+
+def get_total_balance():
+    cursor.execute("SELECT SUM(balance) FROM users")
+    r = cursor.fetchone()[0]
+    return r if r else 0
+
+# ====================== КЛАВИАТУРЫ ======================
+def kb_main():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Перевести", callback_data="transfer")],
+        [InlineKeyboardButton(text="🎮 Мини-игры", callback_data="games")],
+        [InlineKeyboardButton(text="📰 Новости", callback_data="news")],
+        [InlineKeyboardButton(text="📜 История", callback_data="history"), 
+         InlineKeyboardButton(text="👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton(text="📋 Политика", callback_data="policy"),
+         InlineKeyboardButton(text="📖 Команды", callback_data="commands")]
+    ])
+
+def kb_games():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💣 Мины", callback_data="game_mines")],
+        [InlineKeyboardButton(text="🎡 Рулетка", callback_data="game_roulette")],
+        [InlineKeyboardButton(text="🏗️ Башня", callback_data="game_tower")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+    ])
+
+def kb_back():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+    ])
+
+def kb_cancel():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+    ])
+
+def kb_mines():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💣 5 мин", callback_data="mines_start")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="games")]
+    ])
+
+def kb_roulette():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔴 Красное (x2)", callback_data="roulette_red")],
+        [InlineKeyboardButton(text="⚫ Чёрное (x2)", callback_data="roulette_black")],
+        [InlineKeyboardButton(text="🟢 Зелёное (x10)", callback_data="roulette_green")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="games")]
+    ])
+
+def kb_tower():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏗️ Играть (8 этажей)", callback_data="tower_start")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="games")]
+    ])
+
+def kb_mines_field(field, opened, multiplier, clicks):
+    b = []
+    for i in range(5):
+        row = []
+        for j in range(5):
+            cell = i*5 + j
+            if opened[cell]:
+                emoji = field[i][j]
+            else:
+                emoji = "⬜"
+            row.append(InlineKeyboardButton(text=emoji, callback_data=f"m_{cell}"))
+        b.append(row)
+    b.append([InlineKeyboardButton(text=f"💰 Забрать (x{multiplier:.1f})", callback_data="m_cash")])
+    b.append([InlineKeyboardButton(text="🔙 Назад", callback_data="games")])
+    return InlineKeyboardMarkup(inline_keyboard=b)
+
+def kb_mines_result(field):
+    b = []
+    for i in range(5):
+        row = []
+        for j in range(5):
+            row.append(InlineKeyboardButton(text=field[i][j], callback_data="none"))
+        b.append(row)
+    b.append([InlineKeyboardButton(text="🔙 Назад", callback_data="games")])
+    return InlineKeyboardMarkup(inline_keyboard=b)
+
+def kb_tower_btns(current, max_floors, multiplier):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏗️ Строить", callback_data="t_build")],
+        [InlineKeyboardButton(text=f"💰 Забрать (x{multiplier:.1f})", callback_data="t_cash")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="games")]
+    ])
+
+def kb_tower_result():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="games")]
+    ])
+
+def kb_confirm(recipient_id, amount, comission):
+    t = "✅ Подтвердить"
+    if comission > 0:
+        t += f" (комиссия {comission})"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t, callback_data=f"conf_{recipient_id}_{amount}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+    ])
+
+def kb_profile():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Бонус", callback_data="bonus")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back")]
+    ])
+
+# ====================== АДМИН КЛАВИАТУРЫ ======================
+def kb_admin_main():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Все пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
+        [InlineKeyboardButton(text="🔙 Выйти", callback_data="admin_exit")]
+    ])
+
+def kb_admin_user_info(user_id, balance):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Изменить баланс", callback_data=f"admin_edit_balance_{user_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+
+def kb_admin_back():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+    ])
+
+# ====================== FSM ======================
+class TState(StatesGroup):
+    amount = State()
+    recipient = State()
+
+class GState(StatesGroup):
+    bet = State()
+
+class AdminState(StatesGroup):
+    waiting_password = State()
+    waiting_user_id = State()
+    waiting_new_balance = State()
+
+# ====================== КОМАНДЫ ======================
+async def set_commands():
+    await bot.set_my_commands([
+        BotCommand(command="start", description="🏠 Меню"),
+        BotCommand(command="admin_use", description="🔐 Админ панель")
+    ], scope=BotCommandScopeDefault())
+
+# ====================== СТАРТ ======================
+@dp.message(Command("start"))
+async def start(m: types.Message):
+    get_user(m.from_user.id)
+    add_default_news()
+    await m.answer("✨ *BOLT* — твоя цифровая валюта.\nВыбери действие:", reply_markup=kb_main(), parse_mode="Markdown")
+
+# ====================== АДМИН ПАНЕЛЬ ======================
+@dp.message(Command("admin_use"))
+async def admin_use(m: types.Message, state: FSMContext):
+    await m.answer("🔐 *Введите пароль для доступа к админ панели:*", parse_mode="Markdown")
+    await state.set_state(AdminState.waiting_password)
+
+@dp.message(AdminState.waiting_password)
+async def admin_password(m: types.Message, state: FSMContext):
+    if m.text == ADMIN_PASSWORD:
+        await state.clear()
+        await m.answer(
+            "🔐 *Админ панель BOLT*\n\n"
+            "👥 Все пользователи — список всех пользователей\n"
+            "📊 Статистика — общая информация\n\n"
+            "Выбери действие:",
+            reply_markup=kb_admin_main(),
+            parse_mode="Markdown"
+        )
+    else:
+        await m.answer("❌ *Неверный пароль!* Попробуй снова /admin_use", parse_mode="Markdown")
+        await state.clear()
+
+@dp.callback_query(lambda c: c.data == "admin_exit")
+async def admin_exit(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.edit_text("🔐 *Выход из админ панели*", reply_markup=kb_main(), parse_mode="Markdown")
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_back")
+async def admin_back(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.edit_text(
+        "🔐 *Админ панель BOLT*\n\n"
+        "👥 Все пользователи — список всех пользователей\n"
+        "📊 Статистика — общая информация\n\n"
+        "Выбери действие:",
+        reply_markup=kb_admin_main(),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_stats")
+async def admin_stats(c: CallbackQuery):
+    users_count = get_users_count()
+    total_balance = get_total_balance()
+    
+    await c.message.edit_text(
+        "📊 *Статистика BOLT*\n\n"
+        f"👥 Всего пользователей: *{users_count}*\n"
+        f"💰 Общий баланс: *{total_balance} BOLT*",
+        reply_markup=kb_admin_back(),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "admin_users")
+async def admin_users(c: CallbackQuery, state: FSMContext):
+    await c.message.edit_text(
+        "👥 *Введите ID пользователя,*\n"
+        "чтобы посмотреть его информацию:",
+        reply_markup=kb_admin_back(),
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminState.waiting_user_id)
+    await c.answer()
+
+@dp.message(AdminState.waiting_user_id)
+async def admin_find_user(m: types.Message, state: FSMContext):
+    if not m.text.isdigit():
+        await m.answer("❌ Введи корректный ID (только цифры):")
+        return
+    
+    user_id = int(m.text)
+    balance = get_balance(user_id)
+    
+    if balance is None:
+        await m.answer("❌ Пользователь с таким ID не найден.\nПопробуй снова:")
+        return
+    
+    await state.update_data(admin_user_id=user_id)
+    await state.clear()
+    
+    await m.answer(
+        f"👤 *Информация о пользователе*\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"💰 Баланс: *{balance} BOLT*",
+        reply_markup=kb_admin_user_info(user_id, balance),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(lambda c: c.data.startswith("admin_edit_balance_"))
+async def admin_edit_balance(c: CallbackQuery, state: FSMContext):
+    user_id = int(c.data.split("_")[3])
+    await state.update_data(edit_user_id=user_id)
+    await state.set_state(AdminState.waiting_new_balance)
+    
+    await c.message.edit_text(
+        f"💰 *Введи новый баланс* для пользователя `{user_id}`:\n\n"
+        f"Напиши число (например: 1000 или 0)",
+        reply_markup=kb_admin_back(),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.message(AdminState.waiting_new_balance)
+async def admin_set_balance(m: types.Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) < 0:
+        await m.answer("❌ Введи корректное число (только цифры, не меньше 0):")
+        return
+    
+    new_balance = int(m.text)
+    data = await state.get_data()
+    user_id = data.get("edit_user_id")
+    
+    if user_id is None:
+        await m.answer("❌ Ошибка. Попробуй снова /admin_use")
+        await state.clear()
+        return
+    
+    # Меняем баланс
+    set_balance(user_id, new_balance)
+    add_history(user_id, "🛠 Админ", new_balance, f"Админ изменил баланс на {new_balance}")
+    
+    await state.clear()
+    
+    await m.answer(
+        f"✅ *Баланс изменён!*\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"💰 Новый баланс: *{new_balance} BOLT*",
+        reply_markup=kb_admin_back(),
+        parse_mode="Markdown"
+    )
+
+# ====================== НАВИГАЦИЯ ======================
+@dp.callback_query(lambda c: c.data == "back")
+async def back(c: CallbackQuery, state: FSMContext):
+    del_bet(c.from_user.id)
+    await state.clear()
+    await c.message.edit_text("🏠 *Главное меню*\nВыбери действие:", reply_markup=kb_main(), parse_mode="Markdown")
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "cancel")
+async def cancel(c: CallbackQuery, state: FSMContext):
+    del_bet(c.from_user.id)
+    await state.clear()
+    await c.message.edit_text("❌ Отменено.\n\n🏠 *Главное меню*", reply_markup=kb_main(), parse_mode="Markdown")
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "none")
+async def none(c: CallbackQuery):
+    await c.answer()
+
+# ====================== ПРОФИЛЬ ======================
+@dp.callback_query(lambda c: c.data == "profile")
+async def profile(c: CallbackQuery):
+    b = get_balance(c.from_user.id)
+    await c.message.edit_text(
+        f"👤 *Профиль*\n\n🆔 ID: `{c.from_user.id}`\n💰 Баланс: *{b} BOLT*\n\n🎁 Бонус 2000 BOLT (раз в 24ч)",
+        reply_markup=kb_profile(),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "bonus")
+async def bonus(c: CallbackQuery):
+    uid = c.from_user.id
+    _, last = get_user(uid)
+    today = datetime.now().date().isoformat()
+    if last == today:
+        await c.answer("⏳ Бонус уже получен!", show_alert=True)
+        return
+    upd_balance(uid, 2000)
+    set_bonus_date(uid, today)
+    add_history(uid, "🎁 Бонус", 2000, "Ежедневный бонус")
+    await c.message.edit_text("✅ *Бонус получен!*\n\n🎉 +2000 BOLT", reply_markup=kb_back(), parse_mode="Markdown")
+    await c.answer("🎁 +2000 BOLT!", show_alert=True)
+
+# ====================== ПЕРЕВОД ======================
+@dp.callback_query(lambda c: c.data == "transfer")
+async def transfer(c: CallbackQuery, state: FSMContext):
+    await c.message.edit_text("💸 *Перевод*\n\nВведи сумму в BOLT:\n⚠️ От 5000 — комиссия 2%", reply_markup=kb_cancel(), parse_mode="Markdown")
+    await state.set_state(TState.amount)
+    await c.answer()
+
+@dp.message(TState.amount)
+async def process_amount(m: types.Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) <= 0:
+        await m.answer("❌ Введи число > 0:")
+        return
+    amount = int(m.text)
+    balance = get_balance(m.from_user.id)
+    if amount > balance:
+        await m.answer(f"❌ Недостаточно. Баланс: {balance} BOLT")
+        return
+    await state.update_data(amount=amount)
+    await state.set_state(TState.recipient)
+    await m.answer(f"💸 Сумма: *{amount} BOLT*\n\nВведи ID получателя:", reply_markup=kb_cancel(), parse_mode="Markdown")
+
+@dp.message(TState.recipient)
+async def process_recipient(m: types.Message, state: FSMContext):
+    if not m.text.isdigit():
+        await m.answer("❌ ID — только цифры:")
+        return
+    rid = int(m.text)
+    sid = m.from_user.id
+    if rid == sid:
+        await m.answer("❌ Нельзя перевести себе:")
+        return
+    if not get_user(rid):
+        await m.answer("❌ Пользователь не найден:")
+        return
+    data = await state.get_data()
+    amount = data.get("amount")
+    rec_amount, com = calc_comission(amount)
+    text = f"📤 *Проверь перевод*\n\n💸 Сумма: *{amount} BOLT*\n👤 Получатель: `{rid}`\n"
+    if com > 0:
+        text += f"📊 Комиссия 2%: *-{com} BOLT*\n💳 Получит: *{rec_amount} BOLT*"
+    await m.answer(text, reply_markup=kb_confirm(rid, amount, com), parse_mode="Markdown")
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data.startswith("conf_"))
+async def confirm(c: CallbackQuery):
+    _, rid, amount = c.data.split("_")
+    rid = int(rid)
+    amount = int(amount)
+    sid = c.from_user.id
+    balance = get_balance(sid)
+    if amount > balance:
+        await c.message.edit_text("❌ Недостаточно средств.", reply_markup=kb_main())
+        await c.answer()
+        return
+    rec_amount, com = calc_comission(amount)
+    upd_balance(sid, -amount)
+    upd_balance(rid, rec_amount)
+    add_history(sid, "💸 Исходящий", -amount, f"Перевод {rid}")
+    add_history(rid, "💳 Входящий", rec_amount, f"От {sid}")
+    text = f"✅ *Перевод выполнен!*\n\n💸 Отправлено: *{amount} BOLT*\n👤 Получатель: `{rid}`\n"
+    if com > 0:
+        text += f"📊 Комиссия: *{com} BOLT*\n💳 Получил: *{rec_amount} BOLT*"
+    await c.message.edit_text(text, reply_markup=kb_main(), parse_mode="Markdown")
+    await c.answer("✅ Перевод успешен!", show_alert=True)
+
+# ====================== ИСТОРИЯ ======================
+@dp.callback_query(lambda c: c.data == "history")
+async def history(c: CallbackQuery):
+    data = get_history(c.from_user.id)
+    if not data:
+        await c.message.edit_text("📭 *История пуста*", reply_markup=kb_back(), parse_mode="Markdown")
+        await c.answer()
+        return
+    text = "📜 *История (последние 20)*\n\n"
+    for t, amount, detail, date in data:
+        sign = "+" if amount > 0 else ""
+        text += f"{t} {sign}{amount} BOLT | {detail}\n🕐 {date}\n\n"
+    if len(text) > 3500:
+        text = text[:3500] + "\n...\n📌 Последние операции."
+    await c.message.edit_text(text, reply_markup=kb_back(), parse_mode="Markdown")
+    await c.answer()
+
+# ====================== НОВОСТИ ======================
+@dp.callback_query(lambda c: c.data == "news")
+async def news(c: CallbackQuery):
+    data = get_news()
+    if not data:
+        await c.message.edit_text("📰 *Новостей пока нет*", reply_markup=kb_back(), parse_mode="Markdown")
+        await c.answer()
+        return
+    text = "📰 *Новости BOLT*\n\n"
+    for title, content, date in data:
+        text += f"📌 *{title}*\n🕐 {date}\n{content}\n\n──────────\n\n"
+    if len(text) > 4000:
+        text = text[:3950] + "\n...\n📌 Показаны последние новости."
+    await c.message.edit_text(text, reply_markup=kb_back(), parse_mode="Markdown")
+    await c.answer()
+
+# ====================== ПОЛИТИКА ======================
+@dp.callback_query(lambda c: c.data == "policy")
+async def policy(c: CallbackQuery):
+    await c.message.edit_text(
+        "📋 *Политика BOLT*\n\n"
+        "• Мы не несём ответственности за ошибочные переводы\n"
+        "• Возврат средств только при технической ошибке\n"
+        "• Проверяйте ID получателя перед переводом\n"
+        "• Бот не нарушает правила Telegram\n"
+        "• Все транзакции записываются в историю\n"
+        "• Используя бота, вы соглашаетесь с правилами",
+        reply_markup=kb_back(),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+# ====================== КОМАНДЫ ======================
+@dp.callback_query(lambda c: c.data == "commands")
+async def commands(c: CallbackQuery):
+    await c.message.edit_text(
+        "📖 *Команды BOLT*\n\n"
+        "💸 Перевести — перевод средств\n"
+        "🎮 Мини-игры — игры на BOLT\n"
+        "📰 Новости — обновления\n"
+        "📜 История — последние операции\n"
+        "👤 Профиль — ID и баланс\n"
+        "🎁 Бонус — +2000 BOLT (раз в 24ч)\n"
+        "🔐 /admin_use — админ панель\n\n"
+        "⚠️ Комиссия 2% при переводе от 5000 BOLT",
+        reply_markup=kb_back(),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+# ====================== МИНИ-ИГРЫ ======================
+@dp.callback_query(lambda c: c.data == "games")
+async def games(c: CallbackQuery):
+    del_bet(c.from_user.id)
+    await c.message.edit_text("🎮 *Мини-игры BOLT*\n\nВыбери игру:", reply_markup=kb_games(), parse_mode="Markdown")
+    await c.answer()
+
+# ---------- ОБЩАЯ СТАВКА ----------
+@dp.callback_query(lambda c: c.data.startswith("game_"))
+async def game_bet(c: CallbackQuery, state: FSMContext):
+    game = c.data.split("_")[1]
+    await state.update_data(game=game)
+    await state.set_state(GState.bet)
+    await c.message.edit_text("💰 Введи сумму ставки в BOLT:", reply_markup=kb_cancel(), parse_mode="Markdown")
+    await c.answer()
+
+@dp.message(GState.bet)
+async def process_bet(m: types.Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) <= 0:
+        await m.answer("❌ Введи число > 0:")
+        return
+    bet = int(m.text)
+    balance = get_balance(m.from_user.id)
+    if bet > balance:
+        await m.answer(f"❌ Недостаточно. Баланс: {balance} BOLT")
+        return
+    data = await state.get_data()
+    game = data.get("game")
+    save_bet(m.from_user.id, game, bet)
+    await state.clear()
+    if game == "mines":
+        await m.answer("💣 *Мины*\n5 мин на поле 5x5\nКаждое нажатие +0.3 к множителю", reply_markup=kb_mines(), parse_mode="Markdown")
+    elif game == "roulette":
+        await m.answer("🎡 *Рулетка*\n🔴 Красное (x2) | ⚫ Чёрное (x2) | 🟢 Зелёное (x10)\nЗелёное — очень редкий выигрыш!", reply_markup=kb_roulette(), parse_mode="Markdown")
+    elif game == "tower":
+        await m.answer("🏗️ *Башня*\n8 этажей, множитель растёт с каждым этажом.\nРиск падения увеличивается.", reply_markup=kb_tower(), parse_mode="Markdown")
+
+# ====================== МИНЫ ======================
+@dp.callback_query(lambda c: c.data == "mines_start")
+async def mines_start(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    bet_data = get_bet(uid)
+    if not bet_data or bet_data["game"] != "mines":
+        await c.answer("❌ Сначала введи ставку!", show_alert=True)
+        return
+    bet = bet_data["bet"]
+    if bet > get_balance(uid):
+        await c.message.edit_text("❌ Недостаточно средств.", reply_markup=kb_games())
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    field = [["⬜" for _ in range(5)] for _ in range(5)]
+    opened = [False] * 25
+    clicks = 0
+    multiplier = 1.0
+    
+    mine_positions = set()
+    while len(mine_positions) < 5:
+        mine_positions.add(random.randint(0, 24))
+    
+    await state.update_data(
+        game="mines",
+        bet=bet,
+        field=field,
+        opened=opened,
+        mine_positions=list(mine_positions),
+        clicks=clicks,
+        multiplier=multiplier,
+        game_over=False
+    )
+    
+    await c.message.edit_text(
+        f"💣 *Мины*\n\n"
+        f"Ставка: *{bet} BOLT*\n"
+        f"Нажми на клетку, чтобы открыть её.\n"
+        f"Попадание на мину — проигрыш.\n"
+        f"Множитель: x{multiplier:.1f} (+0.3 за нажатие)\n\n"
+        f"Выбери клетку:",
+        reply_markup=kb_mines_field(field, opened, multiplier, clicks),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("m_") and c.data != "m_cash")
+async def mines_cell(c: CallbackQuery, state: FSMContext):
+    cell = int(c.data.split("_")[1])
+    uid = c.from_user.id
+    data = await state.get_data()
+    
+    if data.get("game_over", False):
+        await c.answer("⏳ Игра уже завершена!", show_alert=True)
+        return
+    
+    field = data.get("field", [["⬜" for _ in range(5)] for _ in range(5)])
+    opened = data.get("opened", [False] * 25)
+    mine_positions = data.get("mine_positions", [])
+    bet = data.get("bet", 0)
+    clicks = data.get("clicks", 0)
+    multiplier = data.get("multiplier", 1.0)
+    
+    if opened[cell]:
+        await c.answer("❌ Эта клетка уже открыта!", show_alert=True)
+        return
+    
+    row, col = divmod(cell, 5)
+    opened[cell] = True
+    
+    if cell in mine_positions:
+        field[row][col] = "💣"
+        for pos in mine_positions:
+            r, c2 = divmod(pos, 5)
+            if field[r][c2] != "💣":
+                field[r][c2] = "💣"
+        
+        upd_balance(uid, -bet)
+        add_history(uid, "💣 Мины", -bet, f"Проигрыш (x{multiplier:.1f})")
+        
+        await c.message.edit_text(
+            f"💣 *БАХ!* Ты попал на мину!\n\n"
+            f"Проигрыш: *-{bet} BOLT*\n"
+            f"Множитель был: x{multiplier:.1f}",
+            reply_markup=kb_mines_result(field),
+            parse_mode="Markdown"
+        )
+        await state.update_data(game_over=True)
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    field[row][col] = "✅"
+    clicks += 1
+    multiplier = 1.0 + (clicks * 0.3)
+    
+    await state.update_data(
+        field=field,
+        opened=opened,
+        clicks=clicks,
+        multiplier=multiplier
+    )
+    
+    if clicks >= 20:
+        win = int(bet * multiplier)
+        upd_balance(uid, win)
+        add_history(uid, "💣 Мины", win, f"Выигрыш (x{multiplier:.1f})")
+        
+        for pos in mine_positions:
+            r, c2 = divmod(pos, 5)
+            if field[r][c2] != "💣":
+                field[r][c2] = "💣"
+        
+        await c.message.edit_text(
+            f"🎉 *ПОБЕДА!* Ты открыл все клетки!\n\n"
+            f"Множитель: x{multiplier:.1f}\n"
+            f"Выигрыш: *+{win} BOLT*",
+            reply_markup=kb_mines_result(field),
+            parse_mode="Markdown"
+        )
+        await state.update_data(game_over=True)
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    await c.message.edit_text(
+        f"💣 *Мины*\n\n"
+        f"Ставка: *{bet} BOLT*\n"
+        f"Открыто: {clicks}/20\n"
+        f"Множитель: x{multiplier:.1f} (+0.3 за нажатие)\n\n"
+        f"Выбери клетку:",
+        reply_markup=kb_mines_field(field, opened, multiplier, clicks),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "m_cash")
+async def mines_cash(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    data = await state.get_data()
+    
+    if data.get("game_over", False):
+        await c.answer("⏳ Игра уже завершена!", show_alert=True)
+        return
+    
+    bet = data.get("bet", 0)
+    multiplier = data.get("multiplier", 1.0)
+    clicks = data.get("clicks", 0)
+    field = data.get("field", [["⬜" for _ in range(5)] for _ in range(5)])
+    mine_positions = data.get("mine_positions", [])
+    
+    if clicks == 0:
+        await c.answer("❌ Ты ещё не открыл ни одной клетки!", show_alert=True)
+        return
+    
+    win = int(bet * multiplier)
+    upd_balance(uid, win)
+    add_history(uid, "💣 Мины", win, f"Забрал (x{multiplier:.1f})")
+    
+    for pos in mine_positions:
+        r, c2 = divmod(pos, 5)
+        if field[r][c2] != "💣":
+            field[r][c2] = "💣"
+    
+    await c.message.edit_text(
+        f"💰 *Ты забрал выигрыш!*\n\n"
+        f"Множитель: x{multiplier:.1f}\n"
+        f"Выигрыш: *+{win} BOLT*",
+        reply_markup=kb_mines_result(field),
+        parse_mode="Markdown"
+    )
+    await state.update_data(game_over=True)
+    del_bet(uid)
+    await c.answer()
+
+# ====================== РУЛЕТКА ======================
+@dp.callback_query(lambda c: c.data.startswith("roulette_"))
+async def roulette_play(c: CallbackQuery):
+    color = c.data.split("_")[1]
+    colors = {"red": "🔴", "black": "⚫", "green": "🟢"}
+    mults = {"red": 2, "black": 2, "green": 10}
+    
+    uid = c.from_user.id
+    bet_data = get_bet(uid)
+    if not bet_data or bet_data["game"] != "roulette":
+        await c.answer("❌ Сначала введи ставку!", show_alert=True)
+        return
+    bet = bet_data["bet"]
+    if bet > get_balance(uid):
+        await c.message.edit_text("❌ Недостаточно средств.", reply_markup=kb_games())
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    if random.random() < 0.02:
+        result = "green"
+    else:
+        result = random.choice(["red", "black"])
+    
+    res_emoji = colors[result]
+    
+    if color == result:
+        win = bet * mults[color]
+        upd_balance(uid, win)
+        add_history(uid, "🎡 Рулетка", win, f"Выигрыш ({res_emoji})")
+        await c.message.edit_text(
+            f"🎡 *Рулетка*\nВыпало: {res_emoji}\n✅ Ты угадал!\n🎉 +{win} BOLT (x{mults[color]})",
+            reply_markup=kb_games(),
+            parse_mode="Markdown"
+        )
+    else:
+        upd_balance(uid, -bet)
+        add_history(uid, "🎡 Рулетка", -bet, f"Проигрыш ({res_emoji})")
+        await c.message.edit_text(
+            f"🎡 *Рулетка*\nВыпало: {res_emoji}\n❌ Ты не угадал.\n💸 -{bet} BOLT",
+            reply_markup=kb_games(),
+            parse_mode="Markdown"
+        )
+    del_bet(uid)
+    await c.answer()
+
+# ====================== БАШНЯ ======================
+@dp.callback_query(lambda c: c.data == "tower_start")
+async def tower_start(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    bet_data = get_bet(uid)
+    if not bet_data or bet_data["game"] != "tower":
+        await c.answer("❌ Сначала введи ставку!", show_alert=True)
+        return
+    bet = bet_data["bet"]
+    if bet > get_balance(uid):
+        await c.message.edit_text("❌ Недостаточно средств.", reply_markup=kb_games())
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    max_floors = 8
+    current = 0
+    multiplier = 1.0
+    
+    await state.update_data(
+        game="tower",
+        bet=bet,
+        max_floors=max_floors,
+        current=current,
+        multiplier=multiplier,
+        game_over=False
+    )
+    
+    await c.message.edit_text(
+        f"🏗️ *Башня*\n\n"
+        f"Ставка: *{bet} BOLT*\n"
+        f"Максимум: {max_floors} этажей\n"
+        f"Множитель: x{multiplier:.1f} (+0.3 за этаж)\n"
+        f"Риск падения растёт с каждым этажом\n\n"
+        f"Строй или забери:",
+        reply_markup=kb_tower_btns(current, max_floors, multiplier),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "t_build")
+async def tower_build(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    data = await state.get_data()
+    
+    if data.get("game_over", False):
+        await c.answer("⏳ Игра уже завершена!", show_alert=True)
+        return
+    
+    bet = data.get("bet", 0)
+    max_floors = data.get("max_floors", 8)
+    current = data.get("current", 0)
+    multiplier = data.get("multiplier", 1.0)
+    
+    if bet == 0:
+        await c.answer("❌ Ошибка", show_alert=True)
+        return
+    
+    current += 1
+    multiplier = 1.0 + (current * 0.3)
+    
+    risk = current * 0.05
+    
+    if random.random() < risk:
+        upd_balance(uid, -bet)
+        add_history(uid, "🏗️ Башня", -bet, f"Упал на {current} этаже")
+        await c.message.edit_text(
+            f"🏗️ *Башня*\n💥 Башня рухнула на {current} этаже!\n"
+            f"❌ Проигрыш: *-{bet} BOLT*",
+            reply_markup=kb_tower_result(),
+            parse_mode="Markdown"
+        )
+        await state.update_data(game_over=True)
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    if current >= max_floors:
+        win = int(bet * multiplier)
+        upd_balance(uid, win)
+        add_history(uid, "🏗️ Башня", win, f"Построил {current} этажей (x{multiplier:.1f})")
+        await c.message.edit_text(
+            f"🏗️ *Башня*\n🎉 Ты построил {max_floors} этажей!\n"
+            f"Множитель: x{multiplier:.1f}\n"
+            f"Выигрыш: *+{win} BOLT*",
+            reply_markup=kb_tower_result(),
+            parse_mode="Markdown"
+        )
+        await state.update_data(game_over=True)
+        del_bet(uid)
+        await c.answer()
+        return
+    
+    await state.update_data(current=current, multiplier=multiplier)
+    
+    await c.message.edit_text(
+        f"🏗️ *Башня*\n\n"
+        f"Ставка: *{bet} BOLT*\n"
+        f"Этаж: {current}/{max_floors}\n"
+        f"Множитель: x{multiplier:.1f} (+0.3 за этаж)\n"
+        f"Риск падения: {int(risk * 100)}%\n\n"
+        f"Строй или забери:",
+        reply_markup=kb_tower_btns(current, max_floors, multiplier),
+        parse_mode="Markdown"
+    )
+    await c.answer()
+
+@dp.callback_query(lambda c: c.data == "t_cash")
+async def tower_cash(c: CallbackQuery, state: FSMContext):
+    uid = c.from_user.id
+    data = await state.get_data()
+    
+    if data.get("game_over", False):
+        await c.answer("⏳ Игра уже завершена!", show_alert=True)
+        return
+    
+    bet = data.get("bet", 0)
+    current = data.get("current", 0)
+    multiplier = data.get("multiplier", 1.0)
+    
+    if current == 0:
+        await c.answer("❌ Ты ещё не построил ни одного этажа!", show_alert=True)
+        return
+    
+    win = int(bet * multiplier)
+    upd_balance(uid, win)
+    add_history(uid, "🏗️ Башня", win, f"Забрал на {current} этаже (x{multiplier:.1f})")
+    
+    await c.message.edit_text(
+        f"🏗️ *Башня*\n💰 Ты забрал выигрыш!\n"
+        f"Множитель: x{multiplier:.1f}\n"
+        f"Выигрыш: *+{win} BOLT*",
+        reply_markup=kb_tower_result(),
+        parse_mode="Markdown"
+    )
+    await state.update_data(game_over=True)
+    del_bet(uid)
+    await c.answer()
+
+# ====================== ЗАПУСК ======================
+async def main():
+    await set_commands()
+    add_default_news()
+    print("🚀 Бот BOLT запущен!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
