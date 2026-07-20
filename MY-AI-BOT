@@ -1,0 +1,84 @@
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import Message
+import aiohttp
+import json
+
+# ===== НАСТРОЙКИ =====
+TELEGRAM_TOKEN = "8892754123:AAEVaTPYFuYukyxx1DH3l2xa-8wR0RxD_GE"
+AI_API_KEY = "Nj1eVPEL2K5O8s3nMxvtPaulpGJCZj71"  # ТОЛЬКО ЭТО ВСТАВЬ
+
+# ===== ИНИЦИАЛИЗАЦИЯ =====
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
+user_histories = {}
+
+# ===== ФУНКЦИЯ ЗАПРОСА К AI =====
+async def get_ai_response(user_id: int, user_message: str) -> str:
+    history = user_histories.get(user_id, [])
+    history.append({"role": "user", "content": user_message})
+    if len(history) > 10:
+        history = history[-10:]
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {AI_API_KEY}"
+    }
+    
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": history,
+        "temperature": 0.7,
+        "max_tokens": 1000
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.openai.com/v1/chat/completions", 
+                json=payload, 
+                headers=headers
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    ai_response = data["choices"][0]["message"]["content"]
+                    history.append({"role": "assistant", "content": ai_response})
+                    user_histories[user_id] = history
+                    return ai_response
+                else:
+                    error_text = await resp.text()
+                    return f"❌ Ошибка: {resp.status}\n{error_text[:200]}"
+    except Exception as e:
+        return f"❌ Ошибка: {str(e)}"
+
+# ===== КОМАНДЫ =====
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    await message.answer("🤖 Привет! Просто пиши сообщения.\n/clear - очистить историю")
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: Message):
+    user_histories.pop(message.from_user.id, None)
+    await message.answer("🗑️ Очищено!")
+
+@dp.message()
+async def handle_message(message: Message):
+    await bot.send_chat_action(message.chat.id, action="typing")
+    response = await get_ai_response(message.from_user.id, message.text)
+    
+    if len(response) > 4096:
+        for i in range(0, len(response), 4096):
+            await message.answer(response[i:i+4096])
+    else:
+        await message.answer(response)
+
+# ===== ЗАПУСК =====
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    print("🤖 Бот запущен")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
