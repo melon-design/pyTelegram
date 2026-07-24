@@ -1,0 +1,706 @@
+import asyncio
+import logging
+import os
+import json
+from threading import Thread
+from flask import Flask, render_template_string, request, jsonify
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo, MenuButtonWebApp
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+# ==================== НАСТРОЙКИ ====================
+# Токен бота (получите у @BotFather)
+BOT_TOKEN = "8663629590:AAG_TfFRjaRcbSb4bTqW-4esQVqs6PCq8ks"
+
+# Порт для Flask
+PORT = int(os.environ.get("PORT", 5000))
+
+# URL вашего приложения (для продакшена замените на свой домен)
+# Для локального тестирования используйте ngrok: https://your-ngrok-url.ngrok-free.app
+BASE_URL = "https://bot-1784924995-6128-melon.bothost.tech/"
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ==================== FLASK ПРИЛОЖЕНИЕ (Mini App) ====================
+flask_app = Flask(__name__)
+flask_app.secret_key = os.environ.get('SECRET_KEY', 'super-secret-key-change-me')
+
+# HTML-шаблон Mini App
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Mini App Telegram</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #222222);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 16px;
+            transition: background 0.3s, color 0.3s;
+        }
+        
+        .container {
+            background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            border-radius: 20px;
+            padding: 24px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .avatar {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            margin: 0 auto 16px;
+            background: var(--tg-theme-button-color, #2481cc);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            color: white;
+            font-weight: bold;
+        }
+        
+        h1 {
+            font-size: 24px;
+            margin-bottom: 8px;
+            color: var(--tg-theme-text-color, #222);
+        }
+        
+        .subtitle {
+            font-size: 14px;
+            color: var(--tg-theme-hint-color, #999);
+            margin-bottom: 24px;
+        }
+        
+        .info-card {
+            background: var(--tg-theme-bg-color, #fff);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            text-align: left;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+        
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        
+        .label {
+            font-weight: 500;
+            color: var(--tg-theme-hint-color, #999);
+            font-size: 14px;
+        }
+        
+        .value {
+            font-weight: 600;
+            color: var(--tg-theme-text-color, #222);
+            font-size: 14px;
+        }
+        
+        .counter-section {
+            margin: 20px 0;
+        }
+        
+        .counter-title {
+            color: var(--tg-theme-hint-color, #999);
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        
+        .counter {
+            font-size: 56px;
+            font-weight: bold;
+            margin: 10px 0;
+            color: var(--tg-theme-button-color, #2481cc);
+            transition: transform 0.1s;
+        }
+        
+        .counter.bump {
+            transform: scale(1.2);
+        }
+        
+        .btn {
+            background: var(--tg-theme-button-color, #2481cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            border: none;
+            border-radius: 12px;
+            padding: 14px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 6px;
+            width: 100%;
+            transition: opacity 0.2s, transform 0.1s;
+            touch-action: manipulation;
+        }
+        
+        .btn:active {
+            transform: scale(0.96);
+            opacity: 0.8;
+        }
+        
+        .btn.secondary {
+            background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            color: var(--tg-theme-text-color, #222);
+        }
+        
+        .btn.success {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        .btn-row {
+            display: flex;
+            gap: 8px;
+            margin: 12px 0;
+        }
+        
+        .btn-row .btn {
+            flex: 1;
+        }
+        
+        .status-bar {
+            background: var(--tg-theme-bg-color, #fff);
+            border-radius: 12px;
+            padding: 12px;
+            margin: 16px 0;
+            font-size: 14px;
+            color: var(--tg-theme-hint-color, #999);
+        }
+        
+        .status-bar.success {
+            color: #4CAF50;
+            border: 1px solid #4CAF50;
+        }
+        
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        
+        .toast.show {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="avatar" id="avatar">👤</div>
+        <h1 id="userName">Привет!</h1>
+        <p class="subtitle" id="userUsername"></p>
+        
+        <div class="info-card">
+            <div class="info-row">
+                <span class="label">🆔 ID пользователя</span>
+                <span class="value" id="userId">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">🌐 Язык</span>
+                <span class="value" id="userLang">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">📱 Платформа</span>
+                <span class="value" id="platform">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">🎨 Тема</span>
+                <span class="value" id="theme">-</span>
+            </div>
+        </div>
+        
+        <div class="counter-section">
+            <p class="counter-title">Счётчик нажатий</p>
+            <div class="counter" id="counterValue">0</div>
+        </div>
+        
+        <button class="btn" id="incrementBtn">👍 Увеличить (+1)</button>
+        
+        <div class="btn-row">
+            <button class="btn secondary" id="decrementBtn">👎 Уменьшить (-1)</button>
+            <button class="btn secondary" id="resetBtn">🔄 Сбросить</button>
+        </div>
+        
+        <button class="btn success" id="sendToBotBtn">📤 Отправить результат боту</button>
+        
+        <div class="status-bar" id="statusBar">
+            Готов к работе
+        </div>
+    </div>
+    
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // Инициализация Telegram WebApp
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        
+        // Настройка темы
+        function applyTheme() {
+            const themeParams = tg.themeParams;
+            document.documentElement.style.setProperty('--tg-theme-bg-color', themeParams.bg_color || '#ffffff');
+            document.documentElement.style.setProperty('--tg-theme-text-color', themeParams.text_color || '#222222');
+            document.documentElement.style.setProperty('--tg-theme-hint-color', themeParams.hint_color || '#999999');
+            document.documentElement.style.setProperty('--tg-theme-button-color', themeParams.button_color || '#2481cc');
+            document.documentElement.style.setProperty('--tg-theme-button-text-color', themeParams.button_text_color || '#ffffff');
+            document.documentElement.style.setProperty('--tg-theme-secondary-bg-color', themeParams.secondary_bg_color || '#f0f0f0');
+        }
+        applyTheme();
+        
+        // Данные пользователя
+        const user = tg.initDataUnsafe?.user;
+        
+        if (user) {
+            document.getElementById('userName').textContent = 
+                user.first_name + (user.last_name ? ' ' + user.last_name : '');
+            document.getElementById('userUsername').textContent = 
+                user.username ? '@' + user.username : '';
+            document.getElementById('userId').textContent = user.id;
+            document.getElementById('userLang').textContent = user.language_code || 'не указан';
+            
+            // Аватар с инициалами
+            const initials = (user.first_name ? user.first_name[0] : '') + 
+                           (user.last_name ? user.last_name[0] : '');
+            document.getElementById('avatar').textContent = initials || '👤';
+        }
+        
+        document.getElementById('platform').textContent = tg.platform || 'unknown';
+        document.getElementById('theme').textContent = tg.colorScheme || 'light';
+        
+        // Счётчик с сохранением на сервере
+        let counter = 0;
+        const counterElement = document.getElementById('counterValue');
+        const statusBar = document.getElementById('statusBar');
+        const toast = document.getElementById('toast');
+        
+        function showToast(message) {
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 2000);
+        }
+        
+        function updateStatus(message, success = false) {
+            statusBar.textContent = message;
+            statusBar.className = 'status-bar' + (success ? ' success' : '');
+        }
+        
+        async function syncWithServer(action) {
+            try {
+                const response = await fetch('/api/counter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        counter: counter,
+                        user_id: user ? user.id : null,
+                        action: action,
+                        username: user ? user.username : null
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.status === 'ok') {
+                    updateStatus(`✅ Синхронизировано: ${counter}`, true);
+                }
+            } catch (err) {
+                updateStatus('⚠️ Оффлайн режим');
+                console.log('Ошибка синхронизации:', err);
+            }
+        }
+        
+        function updateCounter() {
+            counterElement.textContent = counter;
+            counterElement.classList.add('bump');
+            setTimeout(() => counterElement.classList.remove('bump'), 100);
+        }
+        
+        // Обработчики кнопок
+        document.getElementById('incrementBtn').addEventListener('click', () => {
+            counter++;
+            updateCounter();
+            syncWithServer('increment');
+            tg.HapticFeedback?.impactOccurred('light');
+        });
+        
+        document.getElementById('decrementBtn').addEventListener('click', () => {
+            if (counter > 0) {
+                counter--;
+                updateCounter();
+                syncWithServer('decrement');
+                tg.HapticFeedback?.impactOccurred('light');
+            } else {
+                showToast('Счётчик уже на нуле! 🛑');
+                tg.HapticFeedback?.notificationOccurred('error');
+            }
+        });
+        
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            counter = 0;
+            updateCounter();
+            syncWithServer('reset');
+            tg.HapticFeedback?.notificationOccurred('warning');
+            showToast('Счётчик сброшен! 🔄');
+        });
+        
+        // Отправка данных боту через MainButton
+        document.getElementById('sendToBotBtn').addEventListener('click', () => {
+            const data = JSON.stringify({
+                counter: counter,
+                user_id: user?.id,
+                username: user?.username
+            });
+            
+            // Используем sendData для отправки данных боту
+            tg.sendData(data);
+            
+            // Также отправляем через API
+            fetch('/api/send-to-bot', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: data
+            });
+            
+            showToast('✅ Данные отправлены боту!');
+            tg.HapticFeedback?.notificationOccurred('success');
+        });
+        
+        // Настройка MainButton Telegram
+        if (tg.MainButton) {
+            tg.MainButton.setText('📤 Отправить результат');
+            tg.MainButton.show();
+            tg.MainButton.onClick(() => {
+                document.getElementById('sendToBotBtn').click();
+            });
+        }
+        
+        // Обработка изменений темы
+        tg.onEvent('themeChanged', () => {
+            applyTheme();
+            document.getElementById('theme').textContent = tg.colorScheme || 'light';
+        });
+        
+        // Расширяем на весь экран
+        tg.expand();
+        
+        // Загружаем сохранённое значение счётчика
+        fetch('/api/get-counter')
+            .then(res => res.json())
+            .then(data => {
+                if (data.counter) {
+                    counter = data.counter;
+                    updateCounter();
+                    updateStatus(`✅ Загружено: ${counter}`, true);
+                }
+            })
+            .catch(() => updateStatus('⚠️ Оффлайн режим'));
+    </script>
+</body>
+</html>
+'''
+
+# Хранилище счётчиков (в реальном проекте используйте БД)
+counters_db = {}
+
+@flask_app.route('/')
+def index():
+    """Главная страница Mini App"""
+    return render_template_string(HTML_TEMPLATE)
+
+@flask_app.route('/api/counter', methods=['POST'])
+def update_counter():
+    """API для обновления счётчика"""
+    try:
+        data = request.get_json()
+        if data:
+            user_id = str(data.get('user_id', 'anonymous'))
+            counter = data.get('counter', 0)
+            action = data.get('action', 'update')
+            
+            counters_db[user_id] = counter
+            
+            logger.info(f"Пользователь {user_id} ({data.get('username')}): {action} -> {counter}")
+            
+            return jsonify({
+                'status': 'ok',
+                'counter': counter,
+                'action': action,
+                'message': f'Счётчик обновлён: {counter}'
+            })
+    except Exception as e:
+        logger.error(f"Ошибка API: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 400
+
+@flask_app.route('/api/get-counter')
+def get_counter():
+    """Получение значения счётчика"""
+    user_id = request.args.get('user_id', 'anonymous')
+    counter = counters_db.get(user_id, 0)
+    return jsonify({'counter': counter})
+
+@flask_app.route('/api/send-to-bot', methods=['POST'])
+def send_to_bot():
+    """Получение данных от Mini App для бота"""
+    try:
+        data = request.get_json()
+        logger.info(f"📤 Данные от Mini App: {json.dumps(data, indent=2)}")
+        return jsonify({'status': 'ok', 'message': 'Данные получены'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 400
+
+@flask_app.route('/health')
+def health():
+    """Проверка работоспособности"""
+    return jsonify({
+        'status': 'ok',
+        'service': 'Telegram Mini App + Bot',
+        'active_counters': len(counters_db)
+    })
+
+# ==================== TELEGRAM БОТ ====================
+# Инициализация бота
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
+dp = Dispatcher()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    """Обработчик команды /start"""
+    
+    # Создаём клавиатуру с кнопкой Mini App
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть Mini App",
+                    web_app=WebAppInfo(url=f"{BASE_URL}")
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 Моя статистика",
+                    callback_data="stats"
+                ),
+                InlineKeyboardButton(
+                    text="❓ Помощь",
+                    callback_data="help"
+                )
+            ]
+        ]
+    )
+    
+    # Получаем счётчик пользователя
+    user_counter = counters_db.get(str(message.from_user.id), 0)
+    
+    welcome_text = f"""
+👋 <b>Привет, {message.from_user.full_name}!</b>
+
+Добро пожаловать в нашего бота с Mini App! 🎉
+
+🎮 <b>Что внутри Mini App:</b>
+• Интерактивный счётчик
+• Информация о твоём профиле
+• Адаптивный дизайн под тему Telegram
+• Синхронизация с ботом
+
+📊 <b>Твой текущий счётчик:</b> <code>{user_counter}</code>
+
+Нажми на кнопку ниже, чтобы открыть Mini App прямо в Telegram!
+    """
+    
+    await message.answer(
+        text=welcome_text,
+        reply_markup=keyboard
+    )
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    """Показывает статистику пользователя"""
+    user_id = str(message.from_user.id)
+    user_counter = counters_db.get(user_id, 0)
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть Mini App",
+                    web_app=WebAppInfo(url=f"{BASE_URL}")
+                )
+            ]
+        ]
+    )
+    
+    stats_text = f"""
+📊 <b>Твоя статистика:</b>
+
+👤 <b>Пользователь:</b> {message.from_user.full_name}
+🆔 <b>ID:</b> <code>{message.from_user.id}</code>
+🔢 <b>Счётчик:</b> <code>{user_counter}</code>
+📅 <b>Всего пользователей:</b> <code>{len(counters_db)}</code>
+
+Открой Mini App, чтобы изменить счётчик!
+    """
+    
+    await message.answer(stats_text, reply_markup=keyboard)
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Помощь по боту"""
+    help_text = """
+📖 <b>Помощь по боту</b>
+
+<b>Доступные команды:</b>
+/start - Главное меню с Mini App
+/stats - Твоя статистика
+/help - Это сообщение
+
+<b>Как использовать Mini App:</b>
+1️⃣ Нажми кнопку <b>"Открыть Mini App"</b>
+2️⃣ Используй счётчик внутри приложения
+3️⃣ Нажми <b>"Отправить результат боту"</b>
+4️⃣ Данные синхронизируются автоматически!
+
+<i>Mini App работает прямо в Telegram!</i>
+    """
+    
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть Mini App",
+                    web_app=WebAppInfo(url=f"{BASE_URL}")
+                )
+            ]
+        ]
+    )
+    
+    await message.answer(help_text, reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data == "stats")
+async def process_stats(callback: types.CallbackQuery):
+    """Обработка кнопки статистики"""
+    await callback.answer()
+    await cmd_stats(callback.message)
+
+@dp.callback_query(lambda c: c.data == "help")
+async def process_help(callback: types.CallbackQuery):
+    """Обработка кнопки помощи"""
+    await callback.answer()
+    await cmd_help(callback.message)
+
+@dp.message()
+async def handle_any_message(message: types.Message):
+    """Обработчик всех остальных сообщений"""
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть Mini App",
+                    web_app=WebAppInfo(url=f"{BASE_URL}")
+                )
+            ]
+        ]
+    )
+    
+    await message.answer(
+        text="👆 Используй Mini App для взаимодействия!\nНажми на кнопку ниже:",
+        reply_markup=keyboard
+    )
+
+async def setup_bot():
+    """Настройка бота при запуске"""
+    try:
+        # Удаляем вебхук и устанавливаем меню
+        await bot.delete_webhook(drop_pending_updates=True)
+        
+        # Устанавливаем кнопку меню (рядом с полем ввода)
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="🎮 Mini App",
+                web_app=WebAppInfo(url=f"{BASE_URL}")
+            )
+        )
+        
+        logger.info("✅ Бот настроен и готов к работе")
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки бота: {e}")
+
+# ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
+def run_flask():
+    """Запуск Flask в отдельном потоке"""
+    logger.info(f"🌐 Запуск Mini App на порту {PORT}")
+    flask_app.run(
+        host='0.0.0.0',
+        port=PORT,
+        debug=False,
+        use_reloader=False
+    )
+
+async def run_bot():
+    """Запуск Telegram бота"""
+    await setup_bot()
+    logger.info("🤖 Бот запущен")
+    await dp.start_polling(bot)
+
+async def main():
+    """Главная функция"""
+    logger.info("🚀 Запуск приложения...")
+    logger.info(f"📱 Mini App URL: {BASE_URL}")
+    logger.info(f"🤖 Bot Token: {BOT_TOKEN[:10]}...")
+    
+    # Запускаем Flask в отдельном потоке
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    
+    # Запускаем бота
+    await run_bot()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Приложение остановлено")
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка: {e}")
