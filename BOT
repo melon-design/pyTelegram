@@ -1,0 +1,704 @@
+# main.py - Исправленная версия с отладкой
+import asyncio
+import logging
+import json
+import os
+import uuid
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Any, Optional
+import zipfile
+import io
+import re
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    WebAppInfo,
+    Message,
+    CallbackQuery
+)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+# ===================== НАСТРОЙКА ЛОГИРОВАНИЯ =====================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ===================== КОНФИГУРАЦИЯ =====================
+# ВАЖНО: Вставьте токен вашего бота сюда
+BOT_TOKEN = "8962090550:AAFtPbAPC3n0l1anaN3mNwou3JBcCh-mI9Q"  # ← ЗАМЕНИТЕ ЭТО
+
+# Проверка токена
+if not BOT_TOKEN or BOT_TOKEN == "ВАШ_ТОКЕН_БОТА_ЗДЕСЬ":
+    print("=" * 50)
+    print("ОШИБКА: Токен бота не установлен!")
+    print("Откройте файл и замените BOT_TOKEN на токен вашего бота")
+    print("=" * 50)
+    sys.exit(1)
+
+APPS_DIR = Path("hosted_apps")
+APPS_DIR.mkdir(exist_ok=True)
+DB_FILE = "apps_database.json"
+
+# ===================== БАЗА ДАННЫХ =====================
+class AppsDatabase:
+    def __init__(self):
+        self.db_file = Path(DB_FILE)
+        self.apps: Dict[str, Dict[str, Any]] = {}
+        self.load()
+    
+    def load(self):
+        if self.db_file.exists():
+            try:
+                with open(self.db_file, 'r', encoding='utf-8') as f:
+                    self.apps = json.load(f)
+                logger.info(f"Loaded {len(self.apps)} apps from database")
+            except Exception as e:
+                logger.error(f"Error loading database: {e}")
+                self.apps = {}
+    
+    def save(self):
+        try:
+            with open(self.db_file, 'w', encoding='utf-8') as f:
+                json.dump(self.apps, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving database: {e}")
+    
+    def add_app(self, user_id: int, app_data: Dict[str, Any]) -> str:
+        app_id = str(uuid.uuid4())[:8]
+        self.apps[app_id] = {
+            "id": app_id,
+            "user_id": user_id,
+            "name": app_data["name"],
+            "filename": app_data.get("filename", ""),
+            "url": "",
+            "local_port": 0,
+            "created_at": datetime.now().isoformat(),
+            "status": "stopped",
+            "visits": 0,
+            "type": app_data.get("type", "python")
+        }
+        self.save()
+        logger.info(f"App added: {app_id} - {app_data['name']}")
+        return app_id
+    
+    def update_app(self, app_id: str, data: Dict[str, Any]):
+        if app_id in self.apps:
+            self.apps[app_id].update(data)
+            self.save()
+    
+    def get_user_apps(self, user_id: int) -> Dict[str, Dict[str, Any]]:
+        return {app_id: app for app_id, app in self.apps.items() if app["user_id"] == user_id}
+    
+    def get_app(self, app_id: str) -> Optional[Dict[str, Any]]:
+        return self.apps.get(app_id)
+    
+    def delete_app(self, app_id: str) -> bool:
+        if app_id in self.apps:
+            app_dir = APPS_DIR / app_id
+            if app_dir.exists():
+                shutil.rmtree(app_dir)
+            del self.apps[app_id]
+            self.save()
+            return True
+        return False
+    
+    def get_all_apps(self):
+        return self.apps
+
+db = AppsDatabase()
+
+# ===================== УПРАВЛЕНИЕ ПРОЦЕССАМИ (УПРОЩЕННОЕ) =====================
+class ProcessManager:
+    def __init__(self):
+        self.processes: Dict[str, Any] = {}
+        self.next_port = 9000
+    
+    def start_app(self, app_id: str) -> int:
+        app = db.get_app(app_id)
+        if not app:
+            raise ValueError("App not found")
+        
+        app_dir = APPS_DIR / app_id
+        app_file = app_dir / app["filename"]
+        
+        if not app_file.exists():
+            raise FileNotFoundError(f"File not found: {app_file}")
+        
+        port = self.next_port
+        self.next_port += 1
+        
+        try:
+            if app["type"] == "html":
+                # Для HTML - встроенный сервер
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "http.server", str(port)],
+                    cwd=str(app_dir),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            else:
+                # Для Python
+                env = os.environ.copy()
+                env["PORT"] = str(port)
+                process = subprocess.Popen(
+                    [sys.executable, str(app_file)],
+                    cwd=str(app_dir),
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            
+            time.sleep(1)
+            
+            if process.poll() is not None:
+                raise RuntimeError("Process failed to start")
+            
+            self.processes[app_id] = {"process": process, "port": port}
+            db.update_app(app_id, {"local_port": port, "status": "running"})
+            logger.info(f"App {app_id} started on port {port}")
+            return port
+            
+        except Exception as e:
+            logger.error(f"Failed to start app {app_id}: {e}")
+            raise
+    
+    def stop_app(self, app_id: str):
+        if app_id in self.processes:
+            try:
+                self.processes[app_id]["process"].terminate()
+                self.processes[app_id]["process"].wait(timeout=3)
+            except:
+                self.processes[app_id]["process"].kill()
+            del self.processes[app_id]
+            db.update_app(app_id, {"status": "stopped"})
+    
+    def is_running(self, app_id: str) -> bool:
+        return app_id in self.processes and self.processes[app_id]["process"].poll() is None
+    
+    def cleanup(self):
+        for app_id in list(self.processes.keys()):
+            self.stop_app(app_id)
+
+process_manager = ProcessManager()
+
+# ===================== УПРАВЛЕНИЕ ТУННЕЛЯМИ (УПРОЩЕННОЕ) =====================
+class TunnelManager:
+    def __init__(self):
+        self.tunnels: Dict[str, Any] = {}
+    
+    def create_tunnel(self, app_id: str, port: int) -> str:
+        # Используем localhost.run (бесплатно, без регистрации)
+        try:
+            cmd = [
+                "ssh", "-o", "StrictHostKeyChecking=no",
+                "-o", "ServerAliveInterval=60",
+                "-R", f"80:localhost:{port}",
+                "nokey@localhost.run"
+            ]
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Ждем URL
+            time.sleep(3)
+            output = ""
+            for _ in range(20):
+                line = process.stdout.readline()
+                if line:
+                    output += line
+                    # Ищем URL вида https://XXXX.lhr.life
+                    match = re.search(r'https://[a-zA-Z0-9\-]+\.lhr\.life', output)
+                    if match:
+                        url = match.group(0)
+                        self.tunnels[app_id] = {"process": process, "url": url}
+                        db.update_app(app_id, {"url": url})
+                        logger.info(f"Tunnel created: {url}")
+                        return url
+                time.sleep(1)
+            
+            process.kill()
+            raise Exception("URL not found in output")
+            
+        except FileNotFoundError:
+            logger.error("SSH not found! Using local URL instead")
+            # Если SSH недоступен, используем локальный URL
+            url = f"http://localhost:{port}"
+            db.update_app(app_id, {"url": url})
+            return url
+        except Exception as e:
+            logger.error(f"Tunnel error: {e}")
+            # Fallback: локальный URL
+            url = f"http://localhost:{port}"
+            db.update_app(app_id, {"url": url})
+            return url
+    
+    def stop_tunnel(self, app_id: str):
+        if app_id in self.tunnels:
+            try:
+                self.tunnels[app_id]["process"].terminate()
+                self.tunnels[app_id]["process"].wait(timeout=3)
+            except:
+                self.tunnels[app_id]["process"].kill()
+            del self.tunnels[app_id]
+    
+    def cleanup(self):
+        for app_id in list(self.tunnels.keys()):
+            self.stop_tunnel(app_id)
+
+tunnel_manager = TunnelManager()
+
+# ===================== ИНИЦИАЛИЗАЦИЯ БОТА =====================
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher(storage=MemoryStorage())
+
+# Состояния
+class AppCreation(StatesGroup):
+    waiting_for_file = State()
+    waiting_for_name = State()
+
+class ZipUpload(StatesGroup):
+    waiting_for_zip = State()
+    waiting_for_name = State()
+
+# ===================== КЛАВИАТУРЫ =====================
+def main_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🐍 Загрузить Python файл", callback_data="upload_python")],
+        [InlineKeyboardButton(text="📦 Загрузить ZIP архив", callback_data="upload_zip")],
+        [InlineKeyboardButton(text="📱 Мои приложения", callback_data="my_apps")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
+    ])
+
+def apps_keyboard(apps):
+    buttons = []
+    for app_id, app in apps.items():
+        status = "🟢" if process_manager.is_running(app_id) else "🔴"
+        buttons.append([InlineKeyboardButton(
+            text=f"{status} {app['name']}",
+            callback_data=f"menu_{app_id}"
+        )])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def app_menu_keyboard(app_id):
+    app = db.get_app(app_id)
+    is_running = process_manager.is_running(app_id)
+    
+    buttons = []
+    
+    if is_running and app.get("url"):
+        buttons.append([InlineKeyboardButton(
+            text="🚀 Открыть Mini App",
+            web_app=WebAppInfo(url=app["url"])
+        )])
+    
+    buttons.append([InlineKeyboardButton(
+        text="▶️ Запустить" if not is_running else "⏹ Остановить",
+        callback_data=f"toggle_{app_id}"
+    )])
+    
+    buttons.extend([
+        [InlineKeyboardButton(text="🔄 Перезапустить", callback_data=f"restart_{app_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{app_id}")],
+        [InlineKeyboardButton(text="🔙 К списку", callback_data="my_apps")]
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ===================== ОБРАБОТЧИКИ =====================
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    """Обработчик /start"""
+    logger.info(f"User {message.from_user.id} started bot")
+    try:
+        await message.answer(
+            "🤖 <b>Хостинг Mini Apps</b>\n\n"
+            "Загружайте Python файлы или ZIP архивы, "
+            "я запущу их как веб-приложения!\n\n"
+            "Выберите действие:",
+            reply_markup=main_keyboard()
+        )
+        logger.info("Start message sent successfully")
+    except Exception as e:
+        logger.error(f"Error in start handler: {e}")
+        await message.answer("Произошла ошибка. Попробуйте /start еще раз")
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """Обработчик /help"""
+    await message.answer(
+        "📚 <b>Помощь</b>\n\n"
+        "Просто выберите действие в меню ниже 👇",
+        reply_markup=main_keyboard()
+    )
+
+@dp.message(Command("ping"))
+async def cmd_ping(message: Message):
+    """Проверка работоспособности"""
+    await message.answer("🏓 Понг! Бот работает.")
+
+# Обработчик всех остальных сообщений (для отладки)
+@dp.message()
+async def handle_any_message(message: Message):
+    """Обработчик любых сообщений"""
+    logger.info(f"Received message: {message.text}")
+    await message.answer(
+        f"Я получил сообщение: {message.text}\n\n"
+        "Используйте /start для начала работы",
+        reply_markup=main_keyboard()
+    )
+
+# ===================== ЗАГРУЗКА PYTHON =====================
+@dp.callback_query(F.data == "upload_python")
+async def upload_python(callback: CallbackQuery, state: FSMContext):
+    logger.info(f"User {callback.from_user.id} uploading Python")
+    await callback.message.edit_text(
+        "🐍 <b>Загрузка Python Mini App</b>\n\n"
+        "Отправьте .py файл с вашим приложением.\n\n"
+        "Приложение должно:\n"
+        "• Запускать веб-сервер\n"
+        "• Использовать порт из os.getenv('PORT')\n"
+        "• Слушать на 0.0.0.0\n\n"
+        "Отправьте файл 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")
+        ]])
+    )
+    await state.set_state(AppCreation.waiting_for_file)
+    await callback.answer()
+
+@dp.message(AppCreation.waiting_for_file, F.document)
+async def process_python(message: Message, state: FSMContext):
+    doc = message.document
+    
+    if not doc.file_name.endswith('.py'):
+        await message.answer("❌ Только .py файлы!")
+        return
+    
+    status = await message.answer("📥 Скачиваю...")
+    
+    try:
+        file = await bot.get_file(doc.file_id)
+        file_bytes = await bot.download_file(file.file_path)
+        code = file_bytes.read().decode('utf-8')
+        
+        temp_dir = APPS_DIR / "temp" / str(message.from_user.id) / str(uuid.uuid4())[:8]
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        with open(temp_dir / doc.file_name, 'w', encoding='utf-8') as f:
+            f.write(code)
+        
+        await state.update_data(temp_dir=str(temp_dir), filename=doc.file_name)
+        await status.edit_text("✅ Файл получен!\nВведите название:")
+        await state.set_state(AppCreation.waiting_for_name)
+        
+    except Exception as e:
+        logger.error(f"Error processing file: {e}")
+        await status.edit_text(f"❌ Ошибка: {e}")
+        await state.clear()
+
+@dp.message(AppCreation.waiting_for_name)
+async def set_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    
+    status = await message.answer("🚀 Запускаю...")
+    
+    try:
+        data = await state.get_data()
+        temp_dir = Path(data['temp_dir'])
+        filename = data['filename']
+        
+        app_id = str(uuid.uuid4())[:8]
+        app_dir = APPS_DIR / app_id
+        app_dir.mkdir(parents=True, exist_ok=True)
+        
+        shutil.move(str(temp_dir / filename), str(app_dir / filename))
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        db.add_app(message.from_user.id, {"name": name, "filename": filename, "type": "python"})
+        
+        port = process_manager.start_app(app_id)
+        url = tunnel_manager.create_tunnel(app_id, port)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Открыть", web_app=WebAppInfo(url=url))],
+            [InlineKeyboardButton(text="📋 Управление", callback_data=f"menu_{app_id}")],
+            [InlineKeyboardButton(text="🔙 Меню", callback_data="main_menu")]
+        ])
+        
+        await status.edit_text(
+            f"✅ <b>Готово!</b>\n\n📱 {name}\n🔗 <code>{url}</code>",
+            reply_markup=keyboard
+        )
+        
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Error launching app: {e}")
+        await status.edit_text(f"❌ Ошибка запуска: {e}")
+        await state.clear()
+
+# ===================== ЗАГРУЗКА ZIP =====================
+@dp.callback_query(F.data == "upload_zip")
+async def upload_zip(callback: CallbackQuery, state: FSMContext):
+    await callback.message.edit_text(
+        "📦 <b>Загрузка ZIP архива</b>\n\n"
+        "Отправьте ZIP с index.html в корне.\n\n"
+        "Отправьте архив 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="main_menu")
+        ]])
+    )
+    await state.set_state(ZipUpload.waiting_for_zip)
+    await callback.answer()
+
+@dp.message(ZipUpload.waiting_for_zip, F.document)
+async def process_zip(message: Message, state: FSMContext):
+    doc = message.document
+    
+    if not doc.file_name.endswith('.zip'):
+        await message.answer("❌ Только ZIP архивы!")
+        return
+    
+    status = await message.answer("📥 Скачиваю...")
+    
+    try:
+        file = await bot.get_file(doc.file_id)
+        file_bytes = await bot.download_file(file.file_path)
+        
+        with zipfile.ZipFile(io.BytesIO(file_bytes.read())) as zf:
+            if 'index.html' not in zf.namelist():
+                await status.edit_text("❌ Нет index.html!")
+                await state.clear()
+                return
+            
+            temp_dir = APPS_DIR / "temp" / str(message.from_user.id) / str(uuid.uuid4())[:8]
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            zf.extractall(temp_dir)
+        
+        await state.update_data(temp_dir=str(temp_dir))
+        await status.edit_text("✅ Архив получен!\nВведите название:")
+        await state.set_state(ZipUpload.waiting_for_name)
+        
+    except Exception as e:
+        await status.edit_text(f"❌ Ошибка: {e}")
+        await state.clear()
+
+@dp.message(ZipUpload.waiting_for_name)
+async def set_zip_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    status = await message.answer("🚀 Разворачиваю...")
+    
+    try:
+        data = await state.get_data()
+        temp_dir = Path(data['temp_dir'])
+        
+        app_id = str(uuid.uuid4())[:8]
+        app_dir = APPS_DIR / app_id
+        
+        shutil.move(str(temp_dir), str(app_dir))
+        
+        db.add_app(message.from_user.id, {"name": name, "filename": "index.html", "type": "html"})
+        
+        port = process_manager.start_app(app_id)
+        url = tunnel_manager.create_tunnel(app_id, port)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Открыть", web_app=WebAppInfo(url=url))],
+            [InlineKeyboardButton(text="📋 Управление", callback_data=f"menu_{app_id}")],
+            [InlineKeyboardButton(text="🔙 Меню", callback_data="main_menu")]
+        ])
+        
+        await status.edit_text(
+            f"✅ <b>Готово!</b>\n\n📱 {name}\n🔗 <code>{url}</code>",
+            reply_markup=keyboard
+        )
+        
+        await state.clear()
+        
+    except Exception as e:
+        await status.edit_text(f"❌ Ошибка: {e}")
+        await state.clear()
+
+# ===================== УПРАВЛЕНИЕ =====================
+@dp.callback_query(F.data == "my_apps")
+async def show_my_apps(callback: CallbackQuery):
+    apps = db.get_user_apps(callback.from_user.id)
+    
+    if not apps:
+        await callback.message.edit_text(
+            "📱 У вас пока нет приложений",
+            reply_markup=main_keyboard()
+        )
+    else:
+        await callback.message.edit_text(
+            f"📱 <b>Мои приложения</b> ({len(apps)})\nВыберите:",
+            reply_markup=apps_keyboard(apps)
+        )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("menu_"))
+async def show_app_menu(callback: CallbackQuery):
+    app_id = callback.data.replace("menu_", "")
+    app = db.get_app(app_id)
+    
+    if not app:
+        await callback.answer("Не найдено", show_alert=True)
+        return
+    
+    is_running = process_manager.is_running(app_id)
+    
+    await callback.message.edit_text(
+        f"📱 <b>{app['name']}</b>\n\n"
+        f"📄 {app['filename']}\n"
+        f"🔗 <code>{app.get('url', 'Не запущено')}</code>\n"
+        f"📊 {'🟢 Работает' if is_running else '🔴 Остановлено'}",
+        reply_markup=app_menu_keyboard(app_id)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("toggle_"))
+async def toggle_app(callback: CallbackQuery):
+    app_id = callback.data.replace("toggle_", "")
+    
+    try:
+        if process_manager.is_running(app_id):
+            tunnel_manager.stop_tunnel(app_id)
+            process_manager.stop_app(app_id)
+            await callback.answer("⏹ Остановлено", show_alert=True)
+        else:
+            port = process_manager.start_app(app_id)
+            url = tunnel_manager.create_tunnel(app_id, port)
+            await callback.answer(f"▶️ Запущено!", show_alert=True)
+        
+        await show_app_menu(callback)
+    except Exception as e:
+        await callback.answer(f"❌ {e}", show_alert=True)
+
+@dp.callback_query(F.data.startswith("restart_"))
+async def restart_app(callback: CallbackQuery):
+    app_id = callback.data.replace("restart_", "")
+    
+    try:
+        if process_manager.is_running(app_id):
+            tunnel_manager.stop_tunnel(app_id)
+            process_manager.stop_app(app_id)
+        
+        port = process_manager.start_app(app_id)
+        url = tunnel_manager.create_tunnel(app_id, port)
+        
+        await callback.message.edit_text(
+            f"✅ Перезапущено!\n🔗 <code>{url}</code>",
+            reply_markup=app_menu_keyboard(app_id)
+        )
+    except Exception as e:
+        await callback.message.edit_text(f"❌ {e}")
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_app(callback: CallbackQuery):
+    app_id = callback.data.replace("delete_", "")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да", callback_data=f"confirm_delete_{app_id}"),
+         InlineKeyboardButton(text="❌ Нет", callback_data=f"menu_{app_id}")]
+    ])
+    
+    await callback.message.edit_text("⚠️ Удалить приложение?", reply_markup=keyboard)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete(callback: CallbackQuery):
+    app_id = callback.data.replace("confirm_delete_", "")
+    
+    tunnel_manager.stop_tunnel(app_id)
+    process_manager.stop_app(app_id)
+    db.delete_app(app_id)
+    
+    await callback.message.edit_text("✅ Удалено", reply_markup=main_keyboard())
+    await callback.answer()
+
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback: CallbackQuery):
+    total = len(db.get_all_apps())
+    running = sum(1 for aid in db.get_all_apps() if process_manager.is_running(aid))
+    
+    await callback.message.edit_text(
+        f"📊 <b>Статистика</b>\n\n"
+        f"📱 Всего: {total}\n"
+        f"🟢 Запущено: {running}\n"
+        f"🔴 Остановлено: {total - running}",
+        reply_markup=main_keyboard()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "main_menu")
+async def back_to_main(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🤖 <b>Главное меню</b>",
+        reply_markup=main_keyboard()
+    )
+    await callback.answer()
+
+# ===================== ЗАПУСК =====================
+async def main():
+    logger.info("=" * 50)
+    logger.info("Starting Mini App Hosting Bot...")
+    logger.info(f"Bot token: {BOT_TOKEN[:10]}...")
+    logger.info("=" * 50)
+    
+    # Проверяем соединение с Telegram
+    try:
+        me = await bot.get_me()
+        logger.info(f"Bot connected as @{me.username}")
+        print(f"\n✅ Бот @{me.username} успешно подключен!\n")
+    except Exception as e:
+        logger.error(f"Failed to connect: {e}")
+        print(f"\n❌ Ошибка подключения: {e}")
+        print("Проверьте токен бота!\n")
+        return
+    
+    # Удаляем вебхук и запускаем поллинг
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted, starting polling...")
+        print("📡 Бот начинает принимать сообщения...")
+        print("Отправьте /start вашему боту в Telegram\n")
+        
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Polling error: {e}")
+        print(f"❌ Ошибка: {e}")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        print("\n👋 Бот остановлен")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        print(f"\n❌ Критическая ошибка: {e}")
