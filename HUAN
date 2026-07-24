@@ -1,0 +1,374 @@
+import os
+import logging
+from flask import Flask, render_template_string, request, jsonify
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', 'your-super-secret-key-change-me')
+
+# HTML-шаблон (встроенный прямо в код)
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Mini App Telegram</title>
+    <!-- Подключаем Telegram WebApp JS -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--tg-theme-bg-color, #ffffff);
+            color: var(--tg-theme-text-color, #222222);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 16px;
+            transition: background 0.3s, color 0.3s;
+        }
+        
+        .container {
+            background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            border-radius: 20px;
+            padding: 24px;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        h1 {
+            font-size: 24px;
+            margin-bottom: 8px;
+            color: var(--tg-theme-text-color, #222);
+        }
+        
+        .subtitle {
+            font-size: 14px;
+            color: var(--tg-theme-hint-color, #999);
+            margin-bottom: 24px;
+        }
+        
+        .avatar {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            margin: 0 auto 16px;
+            background: var(--tg-theme-button-color, #2481cc);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            color: white;
+            font-weight: bold;
+        }
+        
+        .info-card {
+            background: var(--tg-theme-bg-color, #fff);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            text-align: left;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+        
+        .info-row:last-child {
+            border-bottom: none;
+        }
+        
+        .label {
+            font-weight: 500;
+            color: var(--tg-theme-hint-color, #999);
+            font-size: 14px;
+        }
+        
+        .value {
+            font-weight: 600;
+            color: var(--tg-theme-text-color, #222);
+            font-size: 14px;
+        }
+        
+        .counter-section {
+            margin: 20px 0;
+        }
+        
+        .counter {
+            font-size: 48px;
+            font-weight: bold;
+            margin: 10px 0;
+            color: var(--tg-theme-button-color, #2481cc);
+        }
+        
+        .btn {
+            background: var(--tg-theme-button-color, #2481cc);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            border: none;
+            border-radius: 12px;
+            padding: 14px 24px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 6px;
+            width: 100%;
+            transition: opacity 0.2s, transform 0.1s;
+            touch-action: manipulation;
+        }
+        
+        .btn:active {
+            transform: scale(0.96);
+            opacity: 0.8;
+        }
+        
+        .btn.secondary {
+            background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            color: var(--tg-theme-text-color, #222);
+        }
+        
+        .btn-row {
+            display: flex;
+            gap: 8px;
+            margin: 12px 0;
+        }
+        
+        .btn-row .btn {
+            flex: 1;
+        }
+        
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: white;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 14px;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        
+        .toast.show {
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="avatar" id="avatar"></div>
+        <h1 id="userName">Привет!</h1>
+        <p class="subtitle" id="userUsername"></p>
+        
+        <div class="info-card">
+            <div class="info-row">
+                <span class="label">ID пользователя</span>
+                <span class="value" id="userId">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Язык</span>
+                <span class="value" id="userLang">-</span>
+            </div>
+            <div class="info-row">
+                <span class="label">Платформа</span>
+                <span class="value" id="platform">-</span>
+            </div>
+        </div>
+        
+        <div class="counter-section">
+            <p style="color: var(--tg-theme-hint-color, #999); font-size: 14px;">Счётчик нажатий</p>
+            <div class="counter" id="counterValue">0</div>
+        </div>
+        
+        <button class="btn" id="incrementBtn">👍 Увеличить</button>
+        
+        <div class="btn-row">
+            <button class="btn secondary" id="resetBtn">🔄 Сбросить</button>
+            <button class="btn secondary" id="shareBtn">📤 Поделиться</button>
+        </div>
+        
+        <button class="btn" id="mainBtn" style="margin-top: 12px; display: none;">🚀 Главная кнопка ТГ</button>
+    </div>
+    
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // Инициализация Telegram WebApp
+        const tg = window.Telegram.WebApp;
+        
+        // Сообщаем Telegram, что приложение готово
+        tg.ready();
+        
+        // Настройка цветов темы
+        document.documentElement.style.setProperty('--tg-theme-bg-color', tg.themeParams.bg_color || '#ffffff');
+        document.documentElement.style.setProperty('--tg-theme-text-color', tg.themeParams.text_color || '#222222');
+        document.documentElement.style.setProperty('--tg-theme-hint-color', tg.themeParams.hint_color || '#999999');
+        document.documentElement.style.setProperty('--tg-theme-button-color', tg.themeParams.button_color || '#2481cc');
+        document.documentElement.style.setProperty('--tg-theme-button-text-color', tg.themeParams.button_text_color || '#ffffff');
+        document.documentElement.style.setProperty('--tg-theme-secondary-bg-color', tg.themeParams.secondary_bg_color || '#f0f0f0');
+        
+        // Отображаем данные пользователя
+        const user = tg.initDataUnsafe?.user;
+        
+        if (user) {
+            document.getElementById('userName').textContent = user.first_name + (user.last_name ? ' ' + user.last_name : '');
+            document.getElementById('userUsername').textContent = user.username ? '@' + user.username : '';
+            document.getElementById('userId').textContent = user.id;
+            document.getElementById('userLang').textContent = user.language_code || 'не указан';
+            
+            // Аватар с инициалами
+            const initials = (user.first_name ? user.first_name[0] : '?') + (user.last_name ? user.last_name[0] : '');
+            document.getElementById('avatar').textContent = initials.toUpperCase();
+        } else {
+            // Для тестирования вне Telegram
+            document.getElementById('userName').textContent = 'Гость';
+            document.getElementById('userId').textContent = 'Не в Telegram';
+            document.getElementById('avatar').textContent = '👤';
+        }
+        
+        document.getElementById('platform').textContent = tg.platform || 'unknown';
+        
+        // Счётчик
+        let counter = 0;
+        const counterValue = document.getElementById('counterValue');
+        const toast = document.getElementById('toast');
+        
+        function showToast(message) {
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2000);
+        }
+        
+        function updateCounter() {
+            counterValue.textContent = counter;
+            // Отправляем данные на сервер
+            fetch('/api/counter', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    counter: counter,
+                    user_id: user ? user.id : null
+                })
+            }).catch(err => console.log('Ошибка синхронизации:', err));
+        }
+        
+        document.getElementById('incrementBtn').addEventListener('click', () => {
+            counter++;
+            updateCounter();
+            // Тактильная обратная связь
+            tg.HapticFeedback?.impactOccurred('light');
+        });
+        
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            counter = 0;
+            updateCounter();
+            tg.HapticFeedback?.notificationOccurred('warning');
+            showToast('Счётчик сброшен! 🔄');
+        });
+        
+        document.getElementById('shareBtn').addEventListener('click', () => {
+            const shareText = `Мой счётчик: ${counter} 🎉`;
+            if (tg.openTelegramLink) {
+                tg.openTelegramLink(`https://t.me/share/url?url=&text=${encodeURIComponent(shareText)}`);
+            } else {
+                navigator.clipboard.writeText(shareText).then(() => {
+                    showToast('Скопировано в буфер! 📋');
+                });
+            }
+        });
+        
+        // Главная кнопка Telegram
+        const mainBtn = document.getElementById('mainBtn');
+        
+        if (tg.MainButton) {
+            mainBtn.style.display = 'block';
+            tg.MainButton.setText('Отправить результат');
+            tg.MainButton.show();
+            
+            tg.MainButton.onClick(() => {
+                const data = JSON.stringify({
+                    counter: counter,
+                    user: user
+                });
+                tg.sendData(data);
+                showToast('Данные отправлены боту! ✅');
+            });
+            
+            // Синхронизация с локальной кнопкой
+            mainBtn.addEventListener('click', () => {
+                tg.MainButton.click();
+            });
+        }
+        
+        // Расширяем на весь экран
+        tg.expand();
+        
+        // Обработка изменений темы
+        tg.onEvent('themeChanged', () => {
+            document.documentElement.style.setProperty('--tg-theme-bg-color', tg.themeParams.bg_color);
+            document.documentElement.style.setProperty('--tg-theme-text-color', tg.themeParams.text_color);
+            document.documentElement.style.setProperty('--tg-theme-hint-color', tg.themeParams.hint_color);
+            document.documentElement.style.setProperty('--tg-theme-button-color', tg.themeParams.button_color);
+            document.documentElement.style.setProperty('--tg-theme-button-text-color', tg.themeParams.button_text_color);
+            document.documentElement.style.setProperty('--tg-theme-secondary-bg-color', tg.themeParams.secondary_bg_color);
+        });
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    """Главная страница Mini App"""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/counter', methods=['POST'])
+def update_counter():
+    """API для сохранения значения счётчика"""
+    data = request.get_json()
+    if data:
+        logger.info(f"Пользователь {data.get('user_id')} обновил счётчик: {data.get('counter')}")
+        return jsonify({
+            'status': 'ok',
+            'counter': data.get('counter'),
+            'message': 'Счётчик обновлён'
+        })
+    return jsonify({'status': 'error', 'message': 'Нет данных'}), 400
+
+@app.route('/health')
+def health():
+    """Проверка работоспособности"""
+    return jsonify({'status': 'ok', 'service': 'Telegram Mini App'})
+
+if __name__ == '__main__':
+    # Запускаем сервер
+    port = int(os.environ.get('PORT', 5000))
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=False  # В продакшене ставьте False
+    )
