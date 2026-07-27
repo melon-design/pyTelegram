@@ -1,0 +1,945 @@
+import logging
+import json
+import os
+from datetime import datetime
+from flask import Flask, request, jsonify, send_from_directory
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.ext import Application, CommandHandler, ContextTypes
+import asyncio
+import threading
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Конфигурация
+BOT_TOKEN = '8685497157:AAHc6jWsRebXU5PxBHq7wh3E_e2VmDWxleA'  # Замените на ваш токен
+WEBAPP_URL = 'https://your-domain.com'  # Замените на ваш домен
+SECRET_KEY = 'your-secret-key-here'
+
+# Временное хранилище данных (используйте БД в продакшене)
+users_db = {}
+
+# Создаем Flask приложение
+app = Flask(__name__)
+app.config['SECRET_KEY'] = SECRET_KEY
+
+# HTML для Mini App
+MINI_APP_HTML = '''
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Force Games</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #FFD700;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .app {
+            max-width: 480px;
+            margin: 0 auto;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .header {
+            text-align: center;
+            padding: 20px 0;
+            border-bottom: 2px solid #FFD700;
+            margin-bottom: 20px;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .balance-container {
+            background: linear-gradient(135deg, #FFD700, #FFA500);
+            color: #1a1a1a;
+            padding: 15px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .balance-container:active {
+            transform: scale(0.98);
+        }
+
+        .balance-label {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .balance-amount {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        .game-card {
+            background: #2a2a2a;
+            border: 1px solid #FFD700;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .game-card:active {
+            background: #FFD700;
+            color: #1a1a1a;
+        }
+
+        .game-card h3 {
+            font-size: 20px;
+            margin-bottom: 5px;
+        }
+
+        .game-card p {
+            font-size: 14px;
+            opacity: 0.8;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #2a2a2a;
+            border: 2px solid #FFD700;
+            border-radius: 20px;
+            padding: 25px;
+            width: 90%;
+            max-width: 400px;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .modal-header h2 {
+            font-size: 22px;
+        }
+
+        .close-btn {
+            background: none;
+            border: 1px solid #FFD700;
+            color: #FFD700;
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 12px;
+            background: #1a1a1a;
+            border: 1px solid #FFD700;
+            border-radius: 10px;
+            color: #FFD700;
+            font-size: 16px;
+        }
+
+        .mines-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin: 20px 0;
+        }
+
+        .mine-option {
+            padding: 12px;
+            background: #1a1a1a;
+            border: 1px solid #FFD700;
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .mine-option.selected {
+            background: #FFD700;
+            color: #1a1a1a;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            background: #FFD700;
+            color: #1a1a1a;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: transform 0.2s;
+        }
+
+        .btn:active {
+            transform: scale(0.98);
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 2px solid #FFD700;
+            color: #FFD700;
+            margin-top: 10px;
+        }
+
+        .game-board {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 8px;
+            margin: 20px 0;
+        }
+
+        .cell {
+            aspect-ratio: 1;
+            background: #1a1a1a;
+            border: 1px solid #FFD700;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+        }
+
+        .cell.revealed {
+            background: #FFD700;
+            color: #1a1a1a;
+        }
+
+        .cell.mine {
+            background: #ff4444;
+            border-color: #ff4444;
+        }
+
+        .history-item {
+            padding: 15px;
+            border-bottom: 1px solid #FFD700;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .history-item.win {
+            color: #00ff00;
+        }
+
+        .history-item.loss {
+            color: #ff4444;
+        }
+
+        .multiplier-info {
+            background: #1a1a1a;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 10px 0;
+            font-size: 14px;
+        }
+
+        .nav-bar {
+            display: flex;
+            justify-content: space-around;
+            padding: 15px 0;
+            border-top: 2px solid #FFD700;
+            margin-top: 20px;
+        }
+
+        .nav-item {
+            text-align: center;
+            cursor: pointer;
+            padding: 10px;
+            transition: all 0.3s;
+        }
+
+        .nav-item.active {
+            color: #FFA500;
+        }
+
+        .nav-item span {
+            display: block;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <div class="header">
+            <h1>⚡ Force Games</h1>
+        </div>
+
+        <!-- Главный экран -->
+        <div id="mainScreen">
+            <div class="balance-container" onclick="showBalanceMenu()">
+                <div class="balance-label">Баланс ⭐</div>
+                <div class="balance-amount" id="balance">0</div>
+            </div>
+
+            <div class="game-card" onclick="startMinesGame()">
+                <h3>💣 Мины</h3>
+                <p>Открывай ячейки и собирай выигрыш!</p>
+            </div>
+        </div>
+
+        <!-- Экран игры Мины -->
+        <div id="minesGame" style="display: none;">
+            <button class="btn btn-outline" onclick="backToMain()" style="width: auto; margin-bottom: 20px;">
+                ← Назад
+            </button>
+            
+            <h2>Настройка игры</h2>
+            
+            <div class="input-group">
+                <label>Ставка (мин. 10 ⭐)</label>
+                <input type="number" id="betAmount" min="10" value="10" placeholder="Сумма ставки">
+            </div>
+
+            <div class="input-group">
+                <label>Количество мин</label>
+                <div class="mines-grid" id="minesSelection">
+                    <div class="mine-option selected" data-mines="1">1</div>
+                    <div class="mine-option" data-mines="3">3</div>
+                    <div class="mine-option" data-mines="5">5</div>
+                    <div class="mine-option" data-mines="10">10</div>
+                </div>
+            </div>
+
+            <div class="multiplier-info" id="multiplierInfo">
+                Множитель: x1.5
+            </div>
+
+            <button class="btn" onclick="startGame()">Начать игру</button>
+        </div>
+
+        <!-- Игровое поле -->
+        <div id="gameBoard" style="display: none;">
+            <button class="btn btn-outline" onclick="backToSetup()" style="width: auto; margin-bottom: 20px;">
+                ← Назад
+            </button>
+            
+            <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
+                <div>
+                    <div style="font-size: 12px;">Ставка</div>
+                    <div id="currentBet" style="font-size: 20px; font-weight: 700;"></div>
+                </div>
+                <div>
+                    <div style="font-size: 12px;">Текущий выигрыш</div>
+                    <div id="currentWin" style="font-size: 20px; font-weight: 700;">0</div>
+                </div>
+            </div>
+
+            <div class="game-board" id="board"></div>
+
+            <button class="btn" onclick="cashOut()" style="margin-top: 20px;">Забрать выигрыш</button>
+        </div>
+
+        <!-- Модальное окно баланса -->
+        <div class="modal" id="balanceModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Баланс</h2>
+                    <button class="close-btn" onclick="closeBalanceModal()">×</button>
+                </div>
+                
+                <div style="text-align: center; margin: 20px 0;">
+                    <div style="font-size: 40px; font-weight: 700;" id="modalBalance">0</div>
+                    <div style="font-size: 14px;">⭐ Telegram Stars</div>
+                </div>
+
+                <button class="btn" onclick="showDepositModal()">Пополнить</button>
+                <button class="btn btn-outline" onclick="showWithdrawModal()">Вывести</button>
+            </div>
+        </div>
+
+        <!-- Модальное окно пополнения -->
+        <div class="modal" id="depositModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Пополнение</h2>
+                    <button class="close-btn" onclick="closeDepositModal()">×</button>
+                </div>
+                
+                <p style="margin: 20px 0; text-align: center;">
+                    Для пополнения баланса перейдите к модератору
+                    <br><br>
+                    <strong>@ForceGames_Moders</strong>
+                    <br><br>
+                    и отправьте ему подарок от 15 до 100 ⭐
+                </p>
+
+                <button class="btn" onclick="copyModerator()">Скопировать ник</button>
+                <p style="text-align: center; margin-top: 10px; font-size: 12px;">
+                    Баланс будет пополнен после подтверждения
+                </p>
+            </div>
+        </div>
+
+        <!-- Модальное окно вывода -->
+        <div class="modal" id="withdrawModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Вывод средств</h2>
+                    <button class="close-btn" onclick="closeWithdrawModal()">×</button>
+                </div>
+                
+                <p style="margin: 20px 0; text-align: center;">
+                    Минимальная сумма вывода: <strong>100 ⭐</strong>
+                    <br><br>
+                    Вывод осуществляется вручную.
+                    <br>
+                    Запрос будет обработан модератором.
+                </p>
+
+                <div class="input-group">
+                    <label>Сумма вывода</label>
+                    <input type="number" id="withdrawAmount" min="100" placeholder="Минимум 100 ⭐">
+                </div>
+
+                <button class="btn" onclick="requestWithdraw()">Запросить вывод</button>
+            </div>
+        </div>
+
+        <!-- Профиль -->
+        <div id="profileScreen" style="display: none;">
+            <button class="btn btn-outline" onclick="backToMain()" style="width: auto; margin-bottom: 20px;">
+                ← Назад
+            </button>
+            
+            <h2>История игр</h2>
+            <div id="historyContainer">
+                <p style="text-align: center; opacity: 0.6;">Пока нет игр</p>
+            </div>
+        </div>
+
+        <!-- Навигация -->
+        <div class="nav-bar">
+            <div class="nav-item active" onclick="showMainScreen()">
+                <span>🎮</span>
+                <span>Игры</span>
+            </div>
+            <div class="nav-item" onclick="showProfile()">
+                <span>👤</span>
+                <span>Профиль</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+        tg.setHeaderColor('#1a1a1a');
+        tg.setBackgroundColor('#1a1a1a');
+
+        let userId = tg.initDataUnsafe?.user?.id || 123456789;
+        let userData = null;
+        let gameState = null;
+        let selectedMines = 1;
+
+        // Загрузка данных пользователя
+        async function loadUserData() {
+            try {
+                const response = await fetch(`/api/user/${userId}`);
+                userData = await response.json();
+                updateBalanceDisplay();
+                updateHistory();
+            } catch (error) {
+                console.error('Error loading user data:', error);
+            }
+        }
+
+        function updateBalanceDisplay() {
+            if (userData) {
+                document.getElementById('balance').textContent = userData.balance;
+                document.getElementById('modalBalance').textContent = userData.balance;
+            }
+        }
+
+        // Навигация
+        function showMainScreen() {
+            document.getElementById('mainScreen').style.display = 'block';
+            document.getElementById('minesGame').style.display = 'none';
+            document.getElementById('gameBoard').style.display = 'none';
+            document.getElementById('profileScreen').style.display = 'none';
+            
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+            document.querySelectorAll('.nav-item')[0].classList.add('active');
+        }
+
+        function showProfile() {
+            document.getElementById('mainScreen').style.display = 'none';
+            document.getElementById('minesGame').style.display = 'none';
+            document.getElementById('gameBoard').style.display = 'none';
+            document.getElementById('profileScreen').style.display = 'block';
+            
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+            document.querySelectorAll('.nav-item')[1].classList.add('active');
+            
+            updateHistory();
+        }
+
+        // Баланс
+        function showBalanceMenu() {
+            document.getElementById('balanceModal').classList.add('active');
+            updateBalanceDisplay();
+        }
+
+        function closeBalanceModal() {
+            document.getElementById('balanceModal').classList.remove('active');
+        }
+
+        function showDepositModal() {
+            document.getElementById('balanceModal').classList.remove('active');
+            document.getElementById('depositModal').classList.add('active');
+        }
+
+        function closeDepositModal() {
+            document.getElementById('depositModal').classList.remove('active');
+        }
+
+        function showWithdrawModal() {
+            document.getElementById('balanceModal').classList.remove('active');
+            document.getElementById('withdrawModal').classList.add('active');
+        }
+
+        function closeWithdrawModal() {
+            document.getElementById('withdrawModal').classList.remove('active');
+        }
+
+        function copyModerator() {
+            navigator.clipboard.writeText('@ForceGames_Moders');
+            tg.showPopup({
+                title: 'Скопировано!',
+                message: 'Ник модератора скопирован в буфер обмена'
+            });
+        }
+
+        async function requestWithdraw() {
+            const amount = parseInt(document.getElementById('withdrawAmount').value);
+            
+            if (amount < 100) {
+                tg.showPopup({
+                    title: 'Ошибка',
+                    message: 'Минимальная сумма вывода: 100 ⭐'
+                });
+                return;
+            }
+
+            if (userData.balance < amount) {
+                tg.showPopup({
+                    title: 'Ошибка',
+                    message: 'Недостаточно средств'
+                });
+                return;
+            }
+
+            tg.showPopup({
+                title: 'Запрос отправлен',
+                message: `Запрос на вывод ${amount} ⭐ отправлен. Ожидайте обработки.`
+            });
+            
+            closeWithdrawModal();
+        }
+
+        // Игра Мины
+        function startMinesGame() {
+            document.getElementById('mainScreen').style.display = 'none';
+            document.getElementById('minesGame').style.display = 'block';
+            
+            document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+        }
+
+        function backToMain() {
+            showMainScreen();
+        }
+
+        // Выбор мин
+        document.getElementById('minesSelection').addEventListener('click', function(e) {
+            if (e.target.classList.contains('mine-option')) {
+                document.querySelectorAll('.mine-option').forEach(el => el.classList.remove('selected'));
+                e.target.classList.add('selected');
+                selectedMines = parseInt(e.target.dataset.mines);
+                
+                const multipliers = {1: 1.5, 3: 3.0, 5: 5.0, 10: 10.0};
+                document.getElementById('multiplierInfo').textContent = 
+                    `Множитель: x${multipliers[selectedMines]}`;
+            }
+        });
+
+        function startGame() {
+            const bet = parseInt(document.getElementById('betAmount').value);
+            
+            if (bet < 10) {
+                tg.showPopup({
+                    title: 'Ошибка',
+                    message: 'Минимальная ставка: 10 ⭐'
+                });
+                return;
+            }
+
+            if (userData.balance < bet) {
+                tg.showPopup({
+                    title: 'Ошибка',
+                    message: 'Недостаточно средств на балансе'
+                });
+                return;
+            }
+
+            // Инициализация игры
+            gameState = {
+                bet: bet,
+                mines: selectedMines,
+                revealed: 0,
+                board: [],
+                gameOver: false,
+                multiplier: 1,
+                currentWin: 0
+            };
+
+            // Создаем поле 5x5
+            const totalCells = 25;
+            const minePositions = new Set();
+            
+            while (minePositions.size < selectedMines) {
+                minePositions.add(Math.floor(Math.random() * totalCells));
+            }
+
+            for (let i = 0; i < totalCells; i++) {
+                gameState.board.push({
+                    hasMine: minePositions.has(i),
+                    revealed: false
+                });
+            }
+
+            // Списываем ставку
+            userData.balance -= bet;
+            updateBalanceDisplay();
+
+            // Показываем игровое поле
+            document.getElementById('minesGame').style.display = 'none';
+            document.getElementById('gameBoard').style.display = 'block';
+            document.getElementById('currentBet').textContent = bet + ' ⭐';
+            document.getElementById('currentWin').textContent = '0 ⭐';
+            
+            renderBoard();
+        }
+
+        function backToSetup() {
+            document.getElementById('gameBoard').style.display = 'none';
+            document.getElementById('minesGame').style.display = 'block';
+        }
+
+        function renderBoard() {
+            const board = document.getElementById('board');
+            board.innerHTML = '';
+            
+            gameState.board.forEach((cell, index) => {
+                const cellElement = document.createElement('div');
+                cellElement.className = 'cell';
+                
+                if (cell.revealed) {
+                    cellElement.classList.add('revealed');
+                    if (cell.hasMine) {
+                        cellElement.classList.add('mine');
+                        cellElement.textContent = '💣';
+                    } else {
+                        cellElement.textContent = '💎';
+                    }
+                }
+                
+                cellElement.addEventListener('click', () => revealCell(index));
+                board.appendChild(cellElement);
+            });
+        }
+
+        function revealCell(index) {
+            if (gameState.gameOver || gameState.board[index].revealed) return;
+            
+            gameState.board[index].revealed = true;
+            gameState.revealed++;
+            
+            if (gameState.board[index].hasMine) {
+                // Проигрыш
+                gameState.gameOver = true;
+                gameState.board.forEach(cell => {
+                    if (cell.hasMine) cell.revealed = true;
+                });
+                renderBoard();
+                
+                // Сохраняем историю
+                saveGameHistory('loss', -gameState.bet);
+                
+                setTimeout(() => {
+                    tg.showPopup({
+                        title: 'Проигрыш!',
+                        message: `Вы наткнулись на мину и потеряли ${gameState.bet} ⭐`
+                    });
+                }, 500);
+            } else {
+                // Расчет выигрыша
+                const multipliers = {1: 1.5, 3: 3.0, 5: 5.0, 10: 10.0};
+                const baseMultiplier = multipliers[gameState.mines];
+                gameState.multiplier = baseMultiplier * (1 + (gameState.revealed * 0.1));
+                gameState.currentWin = Math.floor(gameState.bet * gameState.multiplier);
+                
+                document.getElementById('currentWin').textContent = gameState.currentWin + ' ⭐';
+                renderBoard();
+            }
+        }
+
+        function cashOut() {
+            if (gameState.gameOver || gameState.revealed === 0) return;
+            
+            const winAmount = gameState.currentWin;
+            userData.balance += winAmount;
+            updateBalanceDisplay();
+            
+            // Сохраняем историю
+            saveGameHistory('win', winAmount);
+            
+            gameState.gameOver = true;
+            
+            // Показываем все мины
+            gameState.board.forEach(cell => {
+                if (cell.hasMine) cell.revealed = true;
+            });
+            renderBoard();
+            
+            setTimeout(() => {
+                tg.showPopup({
+                    title: 'Победа!',
+                    message: `Вы выиграли ${winAmount} ⭐!`
+                });
+                document.getElementById('gameBoard').style.display = 'none';
+                document.getElementById('mainScreen').style.display = 'block';
+            }, 1000);
+        }
+
+        async function saveGameHistory(result, profit) {
+            try {
+                await fetch(`/api/user/${userId}/history`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        game: 'mines',
+                        bet: gameState.bet,
+                        mines: gameState.mines,
+                        result: result,
+                        profit: profit
+                    })
+                });
+            } catch (error) {
+                console.error('Error saving history:', error);
+            }
+            
+            // Обновляем баланс на сервере
+            try {
+                await fetch(`/api/user/${userId}/balance`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({balance: userData.balance})
+                });
+            } catch (error) {
+                console.error('Error updating balance:', error);
+            }
+        }
+
+        function updateHistory() {
+            const container = document.getElementById('historyContainer');
+            if (!userData || !userData.game_history || userData.game_history.length === 0) {
+                container.innerHTML = '<p style="text-align: center; opacity: 0.6;">Пока нет игр</p>';
+                return;
+            }
+            
+            container.innerHTML = userData.game_history.slice().reverse().map(game => `
+                <div class="history-item ${game.result}">
+                    <div>
+                        <div><strong>💣 Мины</strong></div>
+                        <div style="font-size: 12px;">${new Date(game.timestamp).toLocaleString()}</div>
+                        <div style="font-size: 12px;">Ставка: ${game.bet} ⭐ | Мин: ${game.mines}</div>
+                    </div>
+                    <div style="font-size: 18px; font-weight: 700;">
+                        ${game.result === 'win' ? '+' + game.profit : game.profit} ⭐
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Инициализация
+        loadUserData();
+    </script>
+</body>
+</html>
+'''
+
+# Flask routes
+@app.route('/')
+def index():
+    return MINI_APP_HTML
+
+@app.route('/mini-app')
+def mini_app():
+    return MINI_APP_HTML
+
+@app.route('/api/user/<int:user_id>')
+def get_user(user_id):
+    if user_id not in users_db:
+        users_db[user_id] = {
+            'balance': 100,  # Стартовый баланс для теста
+            'game_history': [],
+            'created_at': datetime.now().isoformat()
+        }
+    return jsonify(users_db[user_id])
+
+@app.route('/api/user/<int:user_id>/balance', methods=['POST'])
+def update_balance(user_id):
+    data = request.json
+    if user_id in users_db:
+        users_db[user_id]['balance'] = data.get('balance', 0)
+        return jsonify({'success': True})
+    return jsonify({'error': 'User not found'}), 404
+
+@app.route('/api/user/<int:user_id>/history', methods=['POST'])
+def add_game_history(user_id):
+    data = request.json
+    if user_id in users_db:
+        game_record = {
+            'game': data.get('game', 'mines'),
+            'bet': data.get('bet', 0),
+            'mines': data.get('mines', 0),
+            'result': data.get('result', 'loss'),
+            'profit': data.get('profit', 0),
+            'timestamp': datetime.now().isoformat()
+        }
+        users_db[user_id]['game_history'].append(game_record)
+        return jsonify({'success': True})
+    return jsonify({'error': 'User not found'}), 404
+
+# Telegram Bot
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name
+    
+    # Создаем пользователя если не существует
+    if user_id not in users_db:
+        users_db[user_id] = {
+            'balance': 100,  # Стартовый баланс для теста
+            'game_history': [],
+            'created_at': datetime.now().isoformat()
+        }
+    
+    # Создаем клавиатуру с кнопкой Mini App
+    keyboard = [
+        [InlineKeyboardButton(
+            "🎮 Играть в Force Games", 
+            web_app=WebAppInfo(url=f"{WEBAPP_URL}/mini-app")
+        )]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    welcome_text = f"""
+⚡ *Добро пожаловать в Force Games, {user_name}!*
+
+🎮 Нажмите на кнопку ниже, чтобы начать играть:
+
+• *Мины* - открывайте ячейки и собирайте выигрыш!
+• Минимальная ставка: 10 ⭐
+• Выбор количества мин: 1, 3, 5, 10
+• Система множителей для больших выигрышей
+
+💰 Для пополнения баланса обратитесь к @ForceGames_Moders
+💸 Вывод средств от 100 ⭐
+
+_Удачи в игре!_
+    """
+    
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+def run_flask():
+    """Запуск Flask сервера"""
+    app.run(host='0.0.0.0', port=5000, debug=False)
+
+def main():
+    """Основная функция запуска бота"""
+    # Запускаем Flask в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Создаем и запускаем бота
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Добавляем обработчики
+    application.add_handler(CommandHandler("start", start))
+    
+    # Запускаем бота
+    logger.info("Бот запущен...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
+    main()
