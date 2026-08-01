@@ -1,0 +1,116 @@
+import logging
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
+# Настройка логирования
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ⚠️ ВСТАВЬТЕ СЮДА ТОКЕН, ПОЛУЧЕННЫЙ ОТ @BotFather
+TOKEN = "8363536613:AAF0XgbP7wF_6KGbd07hzK5t2CFIWoGC_-0"
+
+# Текст стартового сообщения
+START_TEXT = (
+    "Приветствую, в нашем боте.\n\n"
+    "Обезательно:\n"
+    "Пользуясь нашим ботом вы автоматически соглашаетесь с "
+    "Политикой Конфидициальности, и Условиями Использования.\n\n"
+    "Выберите действие:"
+)
+
+# ------------------- Клавиатуры -------------------
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    """Главное меню: слева «Создать», справа «Кабинет» сверху, ниже «Информация»."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔔 Создать", callback_data="create"),
+            InlineKeyboardButton("💼 Кабинет", callback_data="cabinet"),
+        ],
+        [
+            InlineKeyboardButton("📰 Информация", callback_data="info"),
+        ],
+    ])
+
+def cabinet_menu_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура раздела «Кабинет»."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📜 Мой список", callback_data="my_list")],
+        [InlineKeyboardButton("🏛️ Настройки", callback_data="settings")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")],
+    ])
+
+def create_menu_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура раздела «Создать»."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 Розыгрыш", callback_data="giveaway")],
+        [InlineKeyboardButton("🎮 Мины", callback_data="mines")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")],
+    ])
+
+def back_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура с кнопкой «Назад»."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_main")],
+    ])
+
+# ------------------- Обработчики -------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправляет стартовое сообщение с главным меню."""
+    await update.message.reply_text(START_TEXT, reply_markup=main_menu_keyboard())
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает все нажатия на инлайн-кнопки."""
+    query = update.callback_query
+    await query.answer()  # убираем часы ожидания
+    data = query.data
+
+    if data == "cabinet":
+        user = query.from_user
+        username = f"@{user.username}" if user.username else "не задан"
+        text = f"💠 {username}\n🆔 {user.id}"
+        await query.edit_message_text(text, reply_markup=cabinet_menu_keyboard())
+
+    elif data == "my_list":
+        text = (
+            "📜 Мой список:\n"
+            "Показывает список твоих уже созданных розыгрышей, конкурсов и "
+            "всего подобного.\n\n"
+            "Сначала просто список, но потом в обновлении добавлю более "
+            "детальный список и информацию о созданных."
+        )
+        await query.edit_message_text(text, reply_markup=back_keyboard())
+
+    elif data == "settings":
+        await query.edit_message_text("🏛️ Настройки\nComing Soon...", reply_markup=back_keyboard())
+
+    elif data == "create":
+        await query.edit_message_text("🔔 Создать\nComing Soon...", reply_markup=create_menu_keyboard())
+
+    elif data == "giveaway":
+        await query.edit_message_text("🎲 Розыгрыш\nComing Soon...", reply_markup=back_keyboard())
+
+    elif data == "mines":
+        await query.edit_message_text("🎮 Мины\nComing Soon...", reply_markup=back_keyboard())
+
+    elif data == "info":
+        await query.edit_message_text("📰 Информация\nComing Soon...", reply_markup=back_keyboard())
+
+    elif data == "back_to_main":
+        await query.edit_message_text(START_TEXT, reply_markup=main_menu_keyboard())
+
+def main() -> None:
+    """Запуск бота."""
+    application = Application.builder().token(TOKEN).build()
+
+    # Регистрируем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Запуск поллинга
+    logger.info("Бот запущен...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
