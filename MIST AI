@@ -1,0 +1,204 @@
+const express = require('express');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ⚠️ ВАЖНО: замените ключ на свой и не публикуйте его в открытом виде!
+const MISTRAL_API_KEY = 'AvIFIhil9X2vgjnViO6cAtlxc8zUj98K';
+const MISTRAL_API_URL = 'https://api.mistral.ai/v1/chat/completions';
+const MODEL = 'mistral-small-latest';
+
+app.use(express.json());
+
+// Отдаём HTML-страницу
+app.get('/', (req, res) => {
+  res.send(`
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Чат с Mistral AI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #f0f2f5;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+    .chat-container {
+      width: 500px;
+      max-width: 95%;
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      display: flex;
+      flex-direction: column;
+      height: 80vh;
+    }
+    .chat-header {
+      padding: 15px 20px;
+      background: #4a76a8;
+      color: #fff;
+      border-radius: 10px 10px 0 0;
+      text-align: center;
+    }
+    .chat-messages {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .message {
+      max-width: 80%;
+      padding: 10px 15px;
+      border-radius: 15px;
+      word-wrap: break-word;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: #4a76a8;
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+    .message.assistant {
+      align-self: flex-start;
+      background: #e9e9eb;
+      color: #000;
+      border-bottom-left-radius: 3px;
+    }
+    .chat-form {
+      display: flex;
+      padding: 15px;
+      border-top: 1px solid #ddd;
+    }
+    .chat-form input {
+      flex: 1;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      font-size: 16px;
+      outline: none;
+    }
+    .chat-form button {
+      margin-left: 10px;
+      padding: 10px 20px;
+      background: #4a76a8;
+      color: #fff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .chat-form button:hover { background: #3b5f87; }
+  </style>
+</head>
+<body>
+  <div class="chat-container">
+    <header class="chat-header">
+      <h1>Чат с Mistral AI</h1>
+    </header>
+    <div id="chat-messages" class="chat-messages"></div>
+    <form id="chat-form" class="chat-form">
+      <input type="text" id="user-input" placeholder="Введите сообщение..." autocomplete="off" required>
+      <button type="submit">Отправить</button>
+    </form>
+  </div>
+  <script>
+    const messagesContainer = document.getElementById('chat-messages');
+    const chatForm = document.getElementById('chat-form');
+    const userInput = document.getElementById('user-input');
+
+    let conversation = [
+      { role: 'system', content: 'Ты — полезный ассистент. Отвечай на русском языке.' }
+    ];
+
+    function addMessage(text, sender) {
+      const messageDiv = document.createElement('div');
+      messageDiv.classList.add('message', sender);
+      messageDiv.textContent = text;
+      messagesContainer.appendChild(messageDiv);
+      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
+
+    chatForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const userText = userInput.value.trim();
+      if (!userText) return;
+
+      addMessage(userText, 'user');
+      conversation.push({ role: 'user', content: userText });
+      userInput.value = '';
+
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: conversation })
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || 'Ошибка запроса');
+        }
+
+        const data = await response.json();
+        const assistantText = data.reply;
+        addMessage(assistantText, 'assistant');
+        conversation.push({ role: 'assistant', content: assistantText });
+      } catch (error) {
+        console.error(error);
+        addMessage('Произошла ошибка: ' + error.message, 'assistant');
+      }
+    });
+  </script>
+</body>
+</html>
+  `);
+});
+
+// Прокси-запрос к Mistral API
+app.post('/api/chat', async (req, res) => {
+  const { messages } = req.body;
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ error: 'Messages array is required' });
+  }
+
+  try {
+    const response = await fetch(MISTRAL_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + MISTRAL_API_KEY
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: messages,
+        temperature: 0.7
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => null);
+      console.error('Mistral API error:', response.status, errorData);
+      return res.status(response.status).json({ error: errorData?.message || 'Mistral API error' });
+    }
+
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content || 'Нет ответа';
+    res.json({ reply });
+  } catch (error) {
+    console.error('Server error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Сервер запущен: http://localhost:${PORT}`);
+});
