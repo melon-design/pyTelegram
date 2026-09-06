@@ -21,8 +21,8 @@ from aiogram.types import (
 )
 
 # ==================== КОНСТАНТЫ (замените на свои значения) ====================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-GOOGLE_API_KEY = "YOUR_GOOGLE_API_KEY_HERE"
+BOT_TOKEN = "8817651095:AAEVQrMhu33ynL5SFa4RJ6n_G_N34-C3YZA"
+GOOGLE_API_KEY = "AIzaSyBF8NNLcQHFbgRTE8-R251kRJloAANn20o"
 GOOGLE_CX_ID = "a00cb216b97c648ba"
 GOOGLE_SEARCH_URL = "https://www.googleapis.com/customsearch/v1"  # правильный endpoint Google CSE
 
