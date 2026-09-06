@@ -20,8 +20,8 @@ from aiogram.types import (
 )
 
 # ==================== КОНСТАНТЫ (замените на свои значения) ====================
-BOT_TOKEN = "ЗДЕСЬ_БУДЕТ_ТОКЕН"
-GOOGLE_API_KEY = "ЗДЕСЬ_БУДЕТ_GOOGLE_API_KEY"
+BOT_TOKEN = "8817651095:AAEVQrMhu33ynL5SFa4RJ6n_G_N34-C3YZA"
+GOOGLE_API_KEY = "AIzaSyBF8NNLcQHFbgRTE8-R251kRJloAANn20o"
 GOOGLE_CX_ID = "a00cb216b97c648ba"
 
 # ВАЖНО: правильный endpoint Google Custom Search — без него запросы не дойдут до сервиса
